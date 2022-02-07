@@ -280,11 +280,22 @@ mati_detector_build (MatiDetector *self)
     g_object_set (G_OBJECT (motioncells), "display", FALSE, NULL);
     self->motion = motioncells;
 
+    GstElement *videoconvert3 = gst_element_factory_make ("videoconvert", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (videoconvert3), FALSE);
+
     GstElement *clockoverlay = gst_element_factory_make ("clockoverlay", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay), FALSE);
 
-    GstElement *autovideosink = gst_element_factory_make ("autovideosink", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (autovideosink), FALSE);
+    GstElement *encoder_detector = gst_element_factory_make ("x264enc", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (encoder_detector), FALSE);
+    // g_object_set (G_OBJECT (encoder_detector), "tune", "zerolatency", "speed-preset", 1, NULL);
+
+    GstElement *parser_detector = gst_element_factory_make ("h264parse", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (parser_detector), FALSE);
+
+    GstElement *writer_detector = gst_element_factory_make ("splitmuxsink", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (writer_detector), FALSE);
+    g_object_set (G_OBJECT (writer_detector), "max-size-time", "3600000000000", "location", "detector%02d.mov", NULL);
 
 
     GstElement *queue_uploader = gst_element_factory_make ("queue", NULL);
@@ -295,20 +306,17 @@ mati_detector_build (MatiDetector *self)
 
     GstElement *encoder_uploader = gst_element_factory_make ("x264enc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (encoder_uploader), FALSE);
-    g_object_set (G_OBJECT (encoder_uploader), "tune", "zerolatency", "speed-preset", 1, NULL);
+    // g_object_set (G_OBJECT (encoder_uploader), "tune", "zerolatency", "speed-preset", 1, NULL);
 
     GstElement *parser_uploader = gst_element_factory_make ("h264parse", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (parser_uploader), FALSE);
 
     GstElement *writer_uploader = gst_element_factory_make ("splitmuxsink", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (writer_uploader), FALSE);
-    g_object_set (G_OBJECT (writer_uploader), "max-size-time", "30000000000", "location", "test%02.mov", NULL);
-
-    GstElement *fakesink = gst_element_factory_make ("fakesink", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (fakesink), FALSE);
+    g_object_set (G_OBJECT (writer_uploader), "max-size-time", "30000000000", "location", "uploader%02d.mov", NULL);
 
     gst_bin_add_many (GST_BIN (self->pipeline), videosource, videoconvert, tee,
-                                                queue_detector, videoconvert2, motioncells, clockoverlay, autovideosink,
+                                                queue_detector, videoconvert2, motioncells, clockoverlay, videoconvert3, encoder_detector, parser_detector, writer_detector,
                                                 queue_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader,
                                                 NULL);
 
@@ -329,7 +337,7 @@ mati_detector_build (MatiDetector *self)
     {
         g_critical ("couldn't link videoconvert2 and motioncells");
     }
-    if (!gst_element_link_many (motioncells, clockoverlay, autovideosink, NULL))
+    if (!gst_element_link_many (motioncells, clockoverlay, videoconvert3, encoder_detector, parser_detector, writer_detector, NULL))
     {
         g_critical ("Couldn't link all detector elements!(2)");
         return FALSE;
