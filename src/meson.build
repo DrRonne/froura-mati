@@ -1,7 +1,7 @@
 mati_sources = files(
     'mati-application.c',
     'mati-detector.c',
-    'mati-uploader.c',
+    'mati-communicator.c',
 )
 
 mati_dependencies = [
@@ -15,7 +15,7 @@ mati_dependencies = [
     gstreamer_video,
 ]
 
-mati_core = static_library('mati-core', [ mati_sources ], dependencies: mati_dependencies)
+mati_core = static_library('mati-core', [ mati_sources, gdbus_mati_src ], dependencies: mati_dependencies)
 
 mati = executable('mati',
     'main.c',

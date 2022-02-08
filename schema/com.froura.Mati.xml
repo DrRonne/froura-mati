@@ -1,0 +1,16 @@
+<!--
+  com.froura.Mati:
+-->
+<node name="com/froura/mati">
+    <interface name="com.froura.mati">
+        <!--
+            NextUploadFile:
+            @number: The number for the next file to be uploaded.
+
+            Signal that triggers when mati starts writing a new upload file.
+        -->
+        <signal name="NextUploadFile">
+            <arg name="number" type="i"/>
+        </signal>
+    </interface>
+</node>

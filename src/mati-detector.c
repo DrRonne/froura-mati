@@ -6,12 +6,15 @@ struct _MatiDetector
 {
     GObject parent_instance;
 
+    MatiCommunicator *communicator;
+
     gboolean is_in_motion;
 
     GstElement *pipeline;
 
     GstElement *convert;
     GstElement *motion;
+    GstElement *valve;
 };
 
 G_DEFINE_TYPE (MatiDetector, mati_detector, G_TYPE_OBJECT);
@@ -109,6 +112,7 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
             {
                 g_message ("motion");
                 self->is_in_motion = !self->is_in_motion;
+                g_object_set (G_OBJECT (self->valve), "drop", !self->is_in_motion, NULL);
             }
         }
         default:
@@ -118,7 +122,7 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
 }
 
 MatiDetector *
-mati_detector_new ()
+mati_detector_new (MatiCommunicator *communicator)
 {
     g_autoptr (MatiDetector) self = g_object_new (MATI_TYPE_DETECTOR, NULL);
     g_autoptr (GstBus) pipeline_bus = NULL;
@@ -129,6 +133,8 @@ mati_detector_new ()
     
     pipeline_bus = gst_element_get_bus (self->pipeline);
     gst_bus_add_watch (pipeline_bus, on_pipeline_message, self);
+
+    self->communicator = communicator;
 
     return g_steal_pointer (&self);
 }
@@ -252,6 +258,13 @@ exit:
     gst_object_unref (sink_pad);
 }
 
+static void
+file_written_handler (GstElement *src, guint *fragment_id, MatiDetector *self)
+{
+    g_message ("file written, next one: %d", fragment_id);
+    mati_communicator_emit_next_file_signal (self->communicator, fragment_id);
+}
+
 gboolean
 mati_detector_build (MatiDetector *self)
 {
@@ -295,11 +308,16 @@ mati_detector_build (MatiDetector *self)
 
     GstElement *writer_detector = gst_element_factory_make ("splitmuxsink", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (writer_detector), FALSE);
-    g_object_set (G_OBJECT (writer_detector), "max-size-time", "3600000000000", "location", "detector%02d.mov", NULL);
+    g_object_set (G_OBJECT (writer_detector), "max-size-time", 3600000000000, "location", "detector%02d.mov", NULL);
 
 
     GstElement *queue_uploader = gst_element_factory_make ("queue", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (queue_uploader), FALSE);
+
+    GstElement *valve_uploader = gst_element_factory_make ("valve", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (valve_uploader), FALSE);
+    g_object_set (G_OBJECT (valve_uploader), "drop", TRUE, NULL);
+    self->valve = valve_uploader;
 
     GstElement *clockoverlay_uploader = gst_element_factory_make ("clockoverlay", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay_uploader), FALSE);
@@ -313,11 +331,12 @@ mati_detector_build (MatiDetector *self)
 
     GstElement *writer_uploader = gst_element_factory_make ("splitmuxsink", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (writer_uploader), FALSE);
-    g_object_set (G_OBJECT (writer_uploader), "max-size-time", "30000000000", "location", "uploader%02d.mov", NULL);
+    g_object_set (G_OBJECT (writer_uploader), "max-size-time", 30000000000, "location", "uploader%02d.mov", NULL);
+    g_signal_connect (writer_uploader, "format-location", G_CALLBACK (file_written_handler), self);
 
     gst_bin_add_many (GST_BIN (self->pipeline), videosource, videoconvert, tee,
                                                 queue_detector, videoconvert2, motioncells, clockoverlay, videoconvert3, encoder_detector, parser_detector, writer_detector,
-                                                queue_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader,
+                                                queue_uploader, valve_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader,
                                                 NULL);
 
     if (!gst_element_link_many (videoconvert, tee, NULL))
@@ -325,7 +344,6 @@ mati_detector_build (MatiDetector *self)
         g_critical ("Couldn't link common pipeline!");
         return FALSE;
     }
-    g_message ("1");
 
     if (!gst_element_link_many (tee, queue_detector, videoconvert2, NULL))
     {
@@ -342,32 +360,12 @@ mati_detector_build (MatiDetector *self)
         g_critical ("Couldn't link all detector elements!(2)");
         return FALSE;
     }
-    g_message ("2");
-    // GstPadTemplate *tee_src_pad_template_detector =  gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (tee), "src_%u");
-    // GstPad *src_detector = gst_element_request_pad (tee, tee_src_pad_template_detector, NULL, NULL);
-    // GstPad *sink_detector = gst_element_get_static_pad (queue_detector, "sink");
-    // if (gst_pad_link (src_detector, sink_detector) != GST_PAD_LINK_OK)
-    // {
-    //     g_critical ("Couldn't link tee to detector queue!");
-    //     return FALSE;
-    // }
-    g_message ("3");
 
-    if (!gst_element_link_many (tee, queue_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
+    if (!gst_element_link_many (tee, queue_uploader, valve_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
     {
         g_critical ("Couldn't link all uploader elements!");
         return FALSE;
     }
-    g_message ("4");
-    // GstPadTemplate *tee_src_pad_template_uploader =  gst_element_class_get_pad_template (GST_ELEMENT_GET_CLASS (tee), "src_%u");
-    // GstPad *src_uploader = gst_element_request_pad (tee, tee_src_pad_template_uploader, NULL, NULL);
-    // GstPad *sink_uploader = gst_element_get_static_pad (queue_uploader, "sink");
-    // if (gst_pad_link (src_uploader, sink_uploader) != GST_PAD_LINK_OK)
-    // {
-    //     g_critical ("Couldn't link tee to uploader queue!");
-    //     return FALSE;
-    // }
-    g_message ("5");
 
     return TRUE;
 }

@@ -1,7 +1,7 @@
 #include "mati-application.h"
+#include "mati-communicator.h"
 
 #include "mati-detector.h"
-// #include "mati-uploader.h"
 #include <gst/gst.h>
 
 struct _MatiApplication
@@ -9,7 +9,7 @@ struct _MatiApplication
     GApplication parent_instance;
 
     MatiDetector *detector;
-    // MatiUploader *uploader;
+    MatiCommunicator *communicator;
 };
 
 G_DEFINE_TYPE (MatiApplication, mati_application, G_TYPE_APPLICATION);
@@ -36,7 +36,9 @@ mati_application_activate (GApplication *app)
 {
     MatiApplication *self = MATI_APPLICATION (app);
 
-    self->detector = mati_detector_new ();
+    self->communicator = mati_communicator_new ("test_app");
+
+    self->detector = mati_detector_new (self->communicator);
     if (self->detector == NULL)
         return;
     
@@ -47,18 +49,6 @@ mati_application_activate (GApplication *app)
     }
 
     mati_detector_start (self->detector);
-
-    // self->uploader = mati_uploader_new ();
-    // if (self->uploader == NULL)
-    //     return;
-    
-    // if (!mati_uploader_build (self->uploader))
-    // {
-    //     g_critical ("Could not build uploader pipeline!");
-    //     return;
-    // }
-
-    // mati_uploader_start (self->detector);
 
     g_application_hold (app);
 

@@ -16,4 +16,5 @@ gstreamer_base = dependency('gstreamer-base-1.0')
 #gstreamer_bad = dependency('gstreamer-bad-1.0')
 gstreamer_video = dependency('gstreamer-video-1.0')
 
+subdir('schema')
 subdir('src')
