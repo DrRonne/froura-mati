@@ -17,6 +17,6 @@ void mati_detector_start (MatiDetector *self);
 
 GstStateChangeReturn mati_detector_stop (MatiDetector *self);
 
-gboolean mati_detector_build (MatiDetector *self);
+gboolean mati_detector_build (MatiDetector *self, gchar *uri, gboolean clockoverlay);
 
 G_END_DECLS

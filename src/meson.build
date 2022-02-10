@@ -1,7 +1,8 @@
 mati_sources = files(
     'mati-application.c',
-    'mati-detector.c',
     'mati-communicator.c',
+    'mati-detector.c',
+    'mati-options.c',
 )
 
 mati_dependencies = [

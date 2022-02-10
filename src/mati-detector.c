@@ -266,13 +266,15 @@ file_written_handler (GstElement *src, guint *fragment_id, MatiDetector *self)
 }
 
 gboolean
-mati_detector_build (MatiDetector *self)
+mati_detector_build (MatiDetector *self, gchar *uri, gboolean clockoverlay)
 {
     g_return_val_if_fail (MATI_IS_DETECTOR (self), FALSE);
+    GstElement *clockoverlay_detector;
+    GstElement *clockoverlay_uploader;
 
     GstElement *videosource = gst_element_factory_make ("uridecodebin", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videosource), FALSE);
-    g_object_set (G_OBJECT (videosource), "uri", "rtsp://wowzaec2demo.streamlock.net/vod/mp4:BigBuckBunny_115k.mp4", NULL);
+    g_object_set (G_OBJECT (videosource), "uri", uri, NULL);
     g_signal_connect (videosource, "pad-added", G_CALLBACK (pad_added_handler), self);
 
     GstElement *videoconvert = gst_element_factory_make ("videoconvert", NULL);
@@ -296,9 +298,6 @@ mati_detector_build (MatiDetector *self)
     GstElement *videoconvert3 = gst_element_factory_make ("videoconvert", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videoconvert3), FALSE);
 
-    GstElement *clockoverlay = gst_element_factory_make ("clockoverlay", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay), FALSE);
-
     GstElement *encoder_detector = gst_element_factory_make ("x264enc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (encoder_detector), FALSE);
     // g_object_set (G_OBJECT (encoder_detector), "tune", "zerolatency", "speed-preset", 1, NULL);
@@ -319,9 +318,6 @@ mati_detector_build (MatiDetector *self)
     g_object_set (G_OBJECT (valve_uploader), "drop", TRUE, NULL);
     self->valve = valve_uploader;
 
-    GstElement *clockoverlay_uploader = gst_element_factory_make ("clockoverlay", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay_uploader), FALSE);
-
     GstElement *encoder_uploader = gst_element_factory_make ("x264enc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (encoder_uploader), FALSE);
     // g_object_set (G_OBJECT (encoder_uploader), "tune", "zerolatency", "speed-preset", 1, NULL);
@@ -335,9 +331,18 @@ mati_detector_build (MatiDetector *self)
     g_signal_connect (writer_uploader, "format-location", G_CALLBACK (file_written_handler), self);
 
     gst_bin_add_many (GST_BIN (self->pipeline), videosource, videoconvert, tee,
-                                                queue_detector, videoconvert2, motioncells, clockoverlay, videoconvert3, encoder_detector, parser_detector, writer_detector,
-                                                queue_uploader, valve_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader,
+                                                queue_detector, videoconvert2, motioncells, videoconvert3, encoder_detector, parser_detector, writer_detector,
+                                                queue_uploader, valve_uploader, encoder_uploader, parser_uploader, writer_uploader,
                                                 NULL);
+
+    if (clockoverlay)
+    {
+        clockoverlay_detector = gst_element_factory_make ("clockoverlay", NULL);
+        g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay_detector), FALSE);
+        clockoverlay_uploader = gst_element_factory_make ("clockoverlay", NULL);
+        g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay_uploader), FALSE);
+        gst_bin_add_many (GST_BIN (self->pipeline), clockoverlay_detector, clockoverlay_uploader, NULL);
+    }
 
     if (!gst_element_link_many (videoconvert, tee, NULL))
     {
@@ -355,16 +360,33 @@ mati_detector_build (MatiDetector *self)
     {
         g_critical ("couldn't link videoconvert2 and motioncells");
     }
-    if (!gst_element_link_many (motioncells, clockoverlay, videoconvert3, encoder_detector, parser_detector, writer_detector, NULL))
+    if (clockoverlay)
     {
-        g_critical ("Couldn't link all detector elements!(2)");
-        return FALSE;
-    }
+        if (!gst_element_link_many (motioncells, clockoverlay_detector, videoconvert3, encoder_detector, parser_detector, writer_detector, NULL))
+        {
+            g_critical ("Couldn't link all detector elements!(2)");
+            return FALSE;
+        }
 
-    if (!gst_element_link_many (tee, queue_uploader, valve_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
+        if (!gst_element_link_many (tee, queue_uploader, valve_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
+        {
+            g_critical ("Couldn't link all uploader elements!");
+            return FALSE;
+        }
+    }
+    else
     {
-        g_critical ("Couldn't link all uploader elements!");
-        return FALSE;
+        if (!gst_element_link_many (motioncells, videoconvert3, encoder_detector, parser_detector, writer_detector, NULL))
+        {
+            g_critical ("Couldn't link all detector elements!(2)");
+            return FALSE;
+        }
+
+        if (!gst_element_link_many (tee, queue_uploader, valve_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
+        {
+            g_critical ("Couldn't link all uploader elements!");
+            return FALSE;
+        }
     }
 
     return TRUE;

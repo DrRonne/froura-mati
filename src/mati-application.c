@@ -1,5 +1,6 @@
 #include "mati-application.h"
 #include "mati-communicator.h"
+#include "mati-options.h"
 
 #include "mati-detector.h"
 #include <gst/gst.h>
@@ -10,6 +11,7 @@ struct _MatiApplication
 
     MatiDetector *detector;
     MatiCommunicator *communicator;
+    MatiOptions *options;
 };
 
 G_DEFINE_TYPE (MatiApplication, mati_application, G_TYPE_APPLICATION);
@@ -36,13 +38,13 @@ mati_application_activate (GApplication *app)
 {
     MatiApplication *self = MATI_APPLICATION (app);
 
-    self->communicator = mati_communicator_new ("test_app");
+    self->communicator = mati_communicator_new (mati_options_get_id(self->options));
 
     self->detector = mati_detector_new (self->communicator);
     if (self->detector == NULL)
         return;
     
-    if (!mati_detector_build (self->detector))
+    if (!mati_detector_build (self->detector, mati_options_get_uri(self->options), mati_options_get_clockoverlay(self->options)))
     {
         g_critical ("Could not build detector pipeline!");
         return;
@@ -82,6 +84,13 @@ mati_application_new (int argc, char *argv[])
     g_autoptr (GError) error = NULL;
 
     self = g_object_new (MATI_TYPE_APPLICATION, "application-id", NULL, "flags", G_APPLICATION_NON_UNIQUE, NULL);
+
+    self->options = mati_options_new();
+    if (!mati_options_read (self->options, &argc, &argv, &error))
+    {
+        g_critical ("Couldn't read arguments: %s", error->message);
+        return NULL;
+    }
 
     return g_steal_pointer (&self);
 }
