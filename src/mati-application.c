@@ -28,7 +28,7 @@ mati_application_finalize (GObject *object)
 {
     MatiApplication *self = MATI_APPLICATION (object);
 
-    // g_clear_object (self->pipeline);
+    g_clear_object (&self->pipeline);
 
     G_OBJECT_CLASS (mati_application_parent_class)->finalize (object);
 }
