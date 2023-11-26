@@ -20,7 +20,6 @@ G_DEFINE_TYPE (MatiApplication, mati_application, G_TYPE_APPLICATION);
 static void
 mati_application_init (MatiApplication *self)
 {
-
 }
 
 static void
@@ -28,7 +27,8 @@ mati_application_finalize (GObject *object)
 {
     MatiApplication *self = MATI_APPLICATION (object);
 
-    g_clear_object (&self->pipeline);
+    g_clear_object (&self->communicator);
+    g_clear_object (&self->detector);
 
     G_OBJECT_CLASS (mati_application_parent_class)->finalize (object);
 }
