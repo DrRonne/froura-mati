@@ -44,7 +44,7 @@ mati_application_activate (GApplication *app)
     if (self->detector == NULL)
         return;
     
-    if (!mati_detector_build (self->detector, mati_options_get_uri(self->options), mati_options_get_clockoverlay(self->options)))
+    if (!mati_detector_build (self->detector, mati_options_get_uri(self->options), mati_options_get_clockoverlay(self->options), mati_options_get_tcp_port(self->options)))
     {
         g_critical ("Could not build detector pipeline!");
         return;
