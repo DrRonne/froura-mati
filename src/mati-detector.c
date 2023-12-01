@@ -12,9 +12,11 @@ struct _MatiDetector
 
     GstElement *pipeline;
 
-    GstElement *convert;
+    GstElement *queue_connect;
     GstElement *motion;
     GstElement *valve;
+
+    gboolean is_encoding;
 };
 
 G_DEFINE_TYPE (MatiDetector, mati_detector, G_TYPE_OBJECT);
@@ -36,6 +38,7 @@ static void
 mati_detector_init (MatiDetector *self)
 {
     self->is_in_motion = FALSE;
+    self->is_encoding = FALSE;
 }
 
 static void
@@ -67,9 +70,9 @@ mati_detector_class_init (MatiDetectorClass *klass)
     object_class->finalize = mati_detector_finalize;
 
     signals[EOS_MESSAGE] = g_signal_new ("eos", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
-    signals[PIPELINE_ERROR] = g_signal_new ("eos", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2, GST_TYPE_ELEMENT, G_TYPE_STRING);
-    signals[PENDING] = g_signal_new ("eos", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
-    signals[PLAYING] = g_signal_new ("eos", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+    signals[PIPELINE_ERROR] = g_signal_new ("error", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2, GST_TYPE_ELEMENT, G_TYPE_STRING);
+    signals[PENDING] = g_signal_new ("pending", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+    signals[PLAYING] = g_signal_new ("playing", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static gboolean
@@ -103,6 +106,7 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
 
                 gst_message_parse_state_changed (message, &old_state, &new_state, NULL);
                 GST_INFO ("Pipeline went from state %s to state %s", gst_element_state_get_name (old_state), gst_element_state_get_name (new_state));
+                GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/pipeline");
             }
             break;
         }
@@ -110,7 +114,7 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
         {
             if (GST_MESSAGE_SRC (message) == (GObject *) self->motion)
             {
-                g_message ("motion");
+                GST_INFO ("motion %s!", self->is_in_motion ? "stopped" : "started");
                 self->is_in_motion = !self->is_in_motion;
                 g_object_set (G_OBJECT (self->valve), "drop", !self->is_in_motion, NULL);
             }
@@ -142,6 +146,7 @@ mati_detector_new (MatiCommunicator *communicator)
 void
 mati_detector_start (MatiDetector *self)
 {
+    g_message ("mati_detector_start");
     gboolean change_success = FALSE;
 
     g_return_if_fail (MATI_IS_DETECTOR (self));
@@ -220,10 +225,18 @@ mati_detector_stop (MatiDetector *self)
     return ret;
 }
 
+static gboolean
+dump_dot (MatiDetector *self)
+{
+    g_message ("dumping dot");
+    GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/pipeline");
+}
+
 static void
 pad_added_handler (GstElement *src, GstPad *new_pad, MatiDetector *self)
 {
-    GstPad *sink_pad = gst_element_get_static_pad (self->convert, "sink");
+    g_message ("pad_added_handler");
+    GstPad *sink_pad = gst_element_get_static_pad (self->queue_connect, "sink");
     GstPadLinkReturn ret;
     g_autoptr (GstCaps) new_pad_caps = NULL;
     GstStructure *new_pad_struct = NULL;
@@ -246,7 +259,7 @@ pad_added_handler (GstElement *src, GstPad *new_pad, MatiDetector *self)
     ret = gst_pad_link (new_pad, sink_pad);
     if (GST_PAD_LINK_FAILED (ret))
     {
-        GST_DEBUG_BIN_TO_DOT_FILE(self->pipeline, GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/dotfile.dot");
+        GST_DEBUG_BIN_TO_DOT_FILE(self->pipeline, GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/dotfile");
         g_critical ("Type is '%s' but link failed.\n", new_pad_type);
     } 
     else
@@ -254,140 +267,223 @@ pad_added_handler (GstElement *src, GstPad *new_pad, MatiDetector *self)
         g_message ("Link succeeded (type '%s').\n", new_pad_type);
     }
 
+    g_timeout_add (10000, dump_dot, self);
+
 exit:
     gst_object_unref (sink_pad);
 }
 
-static void
-file_written_handler (GstElement *src, guint *fragment_id, MatiDetector *self)
+static GstElement*
+build_tcpsink (int tcp_port)
 {
-    g_message ("file written, next one: %d", fragment_id);
-    mati_communicator_emit_next_file_signal (self->communicator, fragment_id);
+    GstElement *bin, *queue_streamer, *streamer_clientsink;
+    GstGhostPad *video_sink_pad;
+
+    queue_streamer = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (queue_streamer), FALSE);
+
+    streamer_clientsink = gst_element_factory_make ("tcpclientsink", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (streamer_clientsink), FALSE);
+    g_object_set (G_OBJECT (streamer_clientsink), "host", "localhost", "port", tcp_port, NULL);
+
+    bin = gst_bin_new ("tcpsinkbin");
+    gst_bin_add_many (GST_BIN (bin), queue_streamer, streamer_clientsink, NULL);
+    if (!gst_element_link (queue_streamer, streamer_clientsink))
+        g_critical ("Failed to link tcpsink elements!");
+
+    video_sink_pad = gst_ghost_pad_new ("sink", gst_element_get_static_pad (queue_streamer, "sink"));
+    if (!gst_element_add_pad (bin, video_sink_pad))
+        g_critical ("Failed to set videosink pad in tcpsink bin!");
+
+    return bin;
 }
 
-gboolean
-mati_detector_build (MatiDetector *self, gchar *uri, gboolean clockoverlay)
+static GstElement*
+build_filesink ()
 {
-    g_return_val_if_fail (MATI_IS_DETECTOR (self), FALSE);
-    GstElement *clockoverlay_detector;
-    GstElement *clockoverlay_uploader;
+    GstElement *bin, *queue_detector, *writer_detector;
+    GstGhostPad *video_sink_pad;
 
-    GstElement *videosource = gst_element_factory_make ("uridecodebin", NULL);
+    queue_detector = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (queue_detector), FALSE);
+
+    writer_detector = gst_element_factory_make ("filesink", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (writer_detector), FALSE);
+    g_object_set (G_OBJECT (writer_detector), "location", "/tmp/test.ogg", NULL);
+
+    bin = gst_bin_new ("filesinkbin");
+    gst_bin_add_many (GST_BIN (bin), queue_detector, writer_detector, NULL);
+    if (!gst_element_link (queue_detector, writer_detector))
+        g_critical ("Failed to link filesink elements!");
+
+    video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (queue_detector, "sink"));
+    if (!gst_element_add_pad (bin, video_sink_pad))
+        g_critical ("Failed to set videosink pad in filesink bin!");
+
+    return bin;
+}
+
+static GstElement*
+build_fakesink ()
+{
+    GstElement *bin, *queue_fakesink, *fakesink;
+    GstGhostPad *video_sink_pad;
+
+    queue_fakesink = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (queue_fakesink), FALSE);
+
+    fakesink = gst_element_factory_make ("fakevideosink", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (fakesink), FALSE);
+
+    bin = gst_bin_new ("fakesinkbin");
+    gst_bin_add_many (GST_BIN (bin), queue_fakesink, fakesink, NULL);
+    if (!gst_element_link (queue_fakesink, fakesink))
+        g_critical ("Failed to link fakesink elements!");
+
+    video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (queue_fakesink, "sink"));
+    if (!gst_element_add_pad (bin, video_sink_pad))
+        g_critical ("Failed to set videosink pad in fakesink bin!");
+
+    return bin;
+}
+
+static GstElement*
+build_encoder_pipeline ()
+{
+    GstElement *bin;
+    GstElement *videoconvert;
+    GstElement *streamer_encoder;
+    GstElement *streamer_mux;
+
+    GstGhostPad *video_sink_pad;
+    GstGhostPad *video_src_pad;
+
+    videoconvert = gst_element_factory_make ("videoconvert", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (videoconvert), FALSE);
+
+    streamer_encoder = gst_element_factory_make ("theoraenc", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (streamer_encoder), FALSE);
+
+    streamer_mux = gst_element_factory_make ("oggmux", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (streamer_mux), FALSE);
+
+    bin = gst_bin_new ("encoderbin");
+    gst_bin_add_many (GST_BIN (bin),
+                      videoconvert, streamer_encoder, streamer_mux,
+                      NULL);
+
+    if (!gst_element_link_many (videoconvert, streamer_encoder, streamer_mux,
+                                NULL))
+        g_critical ("Couldn't link all encoder elements!");
+
+    video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (videoconvert, "sink"));
+    if (!gst_element_add_pad (bin, video_sink_pad))
+        g_critical ("Failed to set videosink pad in encoder bin!");
+    video_src_pad = gst_ghost_pad_new ("videosrc", gst_element_get_static_pad (streamer_mux, "src"));
+    if (!gst_element_add_pad (bin, video_src_pad))
+        g_critical ("Failed to set videosrc pad in encoder bin!");
+    
+    return bin;
+}
+
+static GstElement*
+build_common_pipeline (MatiDetector *self,
+                       gchar        *uri)
+{
+    GstElement *bin;
+
+    GstElement *videosource;
+    GstElement *queue_common;
+    GstElement *videoconvert;
+    GstElement *motioncells;
+
+    GstGhostPad *video_src_pad;
+
+    videosource = gst_element_factory_make ("uridecodebin", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videosource), FALSE);
     g_object_set (G_OBJECT (videosource), "uri", uri, NULL);
     g_signal_connect (videosource, "pad-added", G_CALLBACK (pad_added_handler), self);
 
-    GstElement *videoconvert = gst_element_factory_make ("videoconvert", NULL);
+    queue_common = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (queue_common), FALSE);
+    self->queue_connect = queue_common;
+
+    videoconvert = gst_element_factory_make ("videoconvert", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videoconvert), FALSE);
-    self->convert = videoconvert;
 
-    GstElement *tee = gst_element_factory_make ("tee", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (tee), FALSE);
-
-    GstElement *queue_detector = gst_element_factory_make ("queue", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (queue_detector), FALSE);
-
-    GstElement *videoconvert2 = gst_element_factory_make ("videoconvert", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (videoconvert2), FALSE);
-
-    GstElement *motioncells = gst_element_factory_make ("motioncells", NULL);
+    motioncells = gst_element_factory_make ("motioncells", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (motioncells), FALSE);
     g_object_set (G_OBJECT (motioncells), "display", FALSE, NULL);
     self->motion = motioncells;
 
-    GstElement *videoconvert3 = gst_element_factory_make ("videoconvert", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (videoconvert3), FALSE);
+    bin = gst_bin_new ("commonbin");
+    gst_bin_add_many (GST_BIN (bin), videosource,
+                      queue_common, videoconvert, motioncells,
+                      NULL);
 
-    GstElement *encoder_detector = gst_element_factory_make ("x264enc", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (encoder_detector), FALSE);
-    // g_object_set (G_OBJECT (encoder_detector), "tune", "zerolatency", "speed-preset", 1, NULL);
+    if (!gst_element_link_many (queue_common, videoconvert, motioncells,
+                                NULL))
+        g_critical ("Couldn't link all common pipeline elements!");
 
-    GstElement *parser_detector = gst_element_factory_make ("h264parse", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (parser_detector), FALSE);
+    video_src_pad = gst_ghost_pad_new ("videosrc", gst_element_get_static_pad (motioncells, "src"));
+    if (!gst_element_add_pad (bin, video_src_pad))
+        g_critical ("Failed to set videosrc pad in common pipeline bin!");
 
-    GstElement *writer_detector = gst_element_factory_make ("splitmuxsink", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (writer_detector), FALSE);
-    g_object_set (G_OBJECT (writer_detector), "max-size-time", 3600000000000, "location", "detector%02d.mov", NULL);
+    return bin;
+}
 
+gboolean
+mati_detector_build (MatiDetector *self,
+                     gchar        *uri,
+                     gboolean      clockoverlay,
+                     int           tcp_port)
+{
+    g_return_val_if_fail (MATI_IS_DETECTOR (self), FALSE);
 
-    GstElement *queue_uploader = gst_element_factory_make ("queue", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (queue_uploader), FALSE);
+    GstElement *common_pipeline;
+    GstElement *tee;
+    GstElement *fake_sink_bin;
+    GstElement *encoder_bin;
+    GstElement *tee2;
+    GstElement *tcp_bin;
+    GstElement *file_sink_bin;
 
-    GstElement *valve_uploader = gst_element_factory_make ("valve", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (valve_uploader), FALSE);
-    g_object_set (G_OBJECT (valve_uploader), "drop", TRUE, NULL);
-    self->valve = valve_uploader;
+    common_pipeline = build_common_pipeline (self, uri);
+    tee = gst_element_factory_make ("tee", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (tee), FALSE);
+    fake_sink_bin = build_fakesink ();
+    encoder_bin = build_encoder_pipeline ();
+    tee2 = gst_element_factory_make ("tee", NULL);
+    tcp_bin = build_tcpsink (tcp_port);
+    // file_sink_bin = build_filesink ();
 
-    GstElement *encoder_uploader = gst_element_factory_make ("x264enc", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (encoder_uploader), FALSE);
-    // g_object_set (G_OBJECT (encoder_uploader), "tune", "zerolatency", "speed-preset", 1, NULL);
+    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, tee, fake_sink_bin, encoder_bin, tee2, tcp_bin, /*file_sink_bin,*/ NULL);
+    g_message ("about to dump dot");
+    dump_dot (self);
 
-    GstElement *parser_uploader = gst_element_factory_make ("h264parse", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (parser_uploader), FALSE);
-
-    GstElement *writer_uploader = gst_element_factory_make ("splitmuxsink", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (writer_uploader), FALSE);
-    g_object_set (G_OBJECT (writer_uploader), "max-size-time", 30000000000, "location", "uploader%02d.mov", NULL);
-    g_signal_connect (writer_uploader, "format-location", G_CALLBACK (file_written_handler), self);
-
-    gst_bin_add_many (GST_BIN (self->pipeline), videosource, videoconvert, tee,
-                                                queue_detector, videoconvert2, motioncells, videoconvert3, encoder_detector, parser_detector, writer_detector,
-                                                queue_uploader, valve_uploader, encoder_uploader, parser_uploader, writer_uploader,
-                                                NULL);
-
-    if (clockoverlay)
+    if (!gst_element_link_many (common_pipeline, tee, fake_sink_bin, NULL))
     {
-        clockoverlay_detector = gst_element_factory_make ("clockoverlay", NULL);
-        g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay_detector), FALSE);
-        clockoverlay_uploader = gst_element_factory_make ("clockoverlay", NULL);
-        g_return_val_if_fail (GST_IS_ELEMENT (clockoverlay_uploader), FALSE);
-        gst_bin_add_many (GST_BIN (self->pipeline), clockoverlay_detector, clockoverlay_uploader, NULL);
-    }
-
-    if (!gst_element_link_many (videoconvert, tee, NULL))
-    {
-        g_critical ("Couldn't link common pipeline!");
+        g_critical ("Couldn't link common pipeline to fakesinkbin!");
         return FALSE;
     }
 
-    if (!gst_element_link_many (tee, queue_detector, videoconvert2, NULL))
+    if (!gst_element_link_many (tee, encoder_bin, tee2, NULL))
     {
-        g_critical ("Couldn't link all detector elements!(1)");
+        g_critical ("Couldn't link common pipeline to encoderbin!");
         return FALSE;
     }
-    GstCaps *detector_caps = gst_caps_from_string("video/x-raw format=RGB");
-    if (!gst_element_link_filtered (videoconvert2, motioncells, detector_caps))
-    {
-        g_critical ("couldn't link videoconvert2 and motioncells");
-    }
-    if (clockoverlay)
-    {
-        if (!gst_element_link_many (motioncells, clockoverlay_detector, videoconvert3, encoder_detector, parser_detector, writer_detector, NULL))
-        {
-            g_critical ("Couldn't link all detector elements!(2)");
-            return FALSE;
-        }
 
-        if (!gst_element_link_many (tee, queue_uploader, valve_uploader, clockoverlay_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
-        {
-            g_critical ("Couldn't link all uploader elements!");
-            return FALSE;
-        }
-    }
-    else
+    if (!gst_element_link_many (tee2, tcp_bin, NULL))
     {
-        if (!gst_element_link_many (motioncells, videoconvert3, encoder_detector, parser_detector, writer_detector, NULL))
-        {
-            g_critical ("Couldn't link all detector elements!(2)");
-            return FALSE;
-        }
-
-        if (!gst_element_link_many (tee, queue_uploader, valve_uploader, encoder_uploader, parser_uploader, writer_uploader, NULL))
-        {
-            g_critical ("Couldn't link all uploader elements!");
-            return FALSE;
-        }
+        g_critical ("Couldn't link encoderbin to tcp bin!");
+        return FALSE;
     }
+
+    // if (!gst_element_link_many (tee2, file_sink_bin, NULL))
+    // {
+    //     g_critical ("Couldn't link encoderbin to filesink bin!");
+    //     return FALSE;
+    // }
 
     return TRUE;
 }
