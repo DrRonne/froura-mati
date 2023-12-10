@@ -12,11 +12,17 @@ struct _MatiDetector
 
     GstElement *pipeline;
 
-    GstElement *queue_connect;
-    GstElement *motion;
-    GstElement *valve;
+    GstElement *tee;
+    GstElement *encoder_bin;
+    GstElement *file_sink_bin;
 
-    gboolean is_encoding;
+    GstElement *queue_connect;
+    GstElement *encoder_queue;
+    GstElement *mux_queue;
+    GstElement *mux;
+    GstElement *motion;
+
+    gulong block_pad_id;
 };
 
 G_DEFINE_TYPE (MatiDetector, mati_detector, G_TYPE_OBJECT);
@@ -34,11 +40,15 @@ static guint signals[LAST];
 
 GstStateChangeReturn mati_detector_stop (MatiDetector *self);
 
+static GstElement* build_encoder_pipeline ();
+static GstElement* build_filesink ();
+static GstElement* build_tcpsink (int tcp_port);
+
 static void
 mati_detector_init (MatiDetector *self)
 {
     self->is_in_motion = FALSE;
-    self->is_encoding = FALSE;
+    self->file_sink_bin = NULL;
 }
 
 static void
@@ -73,6 +83,155 @@ mati_detector_class_init (MatiDetectorClass *klass)
     signals[PIPELINE_ERROR] = g_signal_new ("error", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2, GST_TYPE_ELEMENT, G_TYPE_STRING);
     signals[PENDING] = g_signal_new ("pending", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
     signals[PLAYING] = g_signal_new ("playing", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+}
+
+static gboolean
+mati_detector_setup_filesink_pipeline (MatiDetector *self)
+{
+    g_message ("Setting up filesink pipeline");
+
+    self->encoder_bin = build_encoder_pipeline (self);
+    self->file_sink_bin = build_filesink ();
+    gst_bin_add_many (GST_BIN (self->pipeline), self->encoder_bin, self->file_sink_bin, NULL);
+    if (!gst_element_link_many (self->tee, self->encoder_bin, self->file_sink_bin, NULL))
+        g_critical ("Couldn't link filesink pipeline!");
+
+    gst_element_sync_state_with_parent (self->encoder_bin);
+    gst_element_sync_state_with_parent (self->file_sink_bin);
+}
+
+static gboolean
+sync_state_change (GstElement *element,
+                   GstState    state,
+                   char       *element_name)
+{
+    switch (gst_element_set_state (element, state))
+    {
+        case GST_STATE_CHANGE_SUCCESS:
+        {
+            GST_INFO ("%s state succesfully changed to playing!", element_name);
+            return TRUE;
+        }
+        case GST_STATE_CHANGE_ASYNC:
+        {
+            GST_INFO ("The state change of %s will happen asynchronously, waiting for state change.", element_name);
+            GstState current_state, pending;
+            GstStateChangeReturn res = gst_element_get_state (element, &current_state, &pending, GST_CLOCK_TIME_NONE);
+            if (res == GST_STATE_CHANGE_SUCCESS && state == current_state)
+            {
+                g_message ("state change successful!");
+                return TRUE;
+            }
+            return FALSE;
+        }
+        case GST_STATE_CHANGE_FAILURE:
+        {
+            GST_INFO ("Failed to change state of %s!!", element_name);
+            return FALSE;
+        }
+        case GST_STATE_CHANGE_NO_PREROLL:
+        {
+            GST_INFO ("State change of %s succeeded, but element cannot produce data while paused", element_name);
+            return FALSE;
+        }
+        default:
+            return FALSE;
+    }
+}
+
+static gboolean
+async_destroy_encoder_bin (gpointer user_data)
+{
+    MatiDetector *self = MATI_DETECTOR (user_data);
+    g_autoptr (GstIterator) pad_iter = NULL;
+
+    sync_state_change (self->encoder_bin, GST_STATE_NULL, "encoder bin");
+    gst_element_unlink (self->tee, self->encoder_bin);
+    pad_iter = gst_element_iterate_src_pads (self->tee);
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next (pad_iter, &item)) {
+        case GST_ITERATOR_OK:
+            GstPad *src_pad = g_value_get_object (&item);
+            if (!gst_pad_is_linked (src_pad))
+                gst_element_remove_pad (self->tee, src_pad);
+            g_value_reset (&item);
+            break;
+        case GST_ITERATOR_RESYNC:
+            g_warning ("iterator resync");
+            gst_iterator_resync (pad_iter);
+            break;
+        case GST_ITERATOR_ERROR:
+            g_warning ("iterator error");
+            done = TRUE;
+            break;
+        case GST_ITERATOR_DONE:
+            done = TRUE;
+            break;
+        }
+    }
+    g_value_unset (&item);
+    if (!gst_bin_remove (GST_BIN (self->pipeline), self->encoder_bin))
+        g_critical ("Couldn't remove encoder bin from pipeline!");
+    self->encoder_bin = NULL;
+    return FALSE;
+}
+
+static void
+on_mux_queue_blocked (GstPad          *pad,
+                      GstPadProbeInfo *info,
+                      gpointer         user_data)
+{
+    MatiDetector *self = MATI_DETECTOR (user_data);
+
+    if (gst_pad_is_blocked (pad))
+    {
+        g_autoptr (GstIterator) pad_iter = gst_element_iterate_sink_pads (self->mux);
+        GValue item = G_VALUE_INIT;
+        gboolean done = FALSE;
+        while (!done) {
+            switch (gst_iterator_next (pad_iter, &item)) {
+            case GST_ITERATOR_OK:
+                GstPad *sink_pad = g_value_get_object (&item);
+                GstEvent *eos_event = gst_event_new_eos ();
+                gboolean handled = gst_pad_send_event (sink_pad, eos_event);
+                g_value_reset (&item);
+                break;
+            case GST_ITERATOR_RESYNC:
+                g_warning ("iterator resync");
+                gst_iterator_resync (pad_iter);
+                break;
+            case GST_ITERATOR_ERROR:
+                g_warning ("iterator error");
+                done = TRUE;
+                break;
+            case GST_ITERATOR_DONE:
+                done = TRUE;
+                break;
+            }
+        }
+        g_value_unset (&item);
+        sync_state_change (self->file_sink_bin, GST_STATE_NULL, "filesink bin");
+        gst_element_unlink (self->encoder_bin, self->file_sink_bin);
+        if (!gst_bin_remove (GST_BIN (self->pipeline), self->file_sink_bin))
+            g_critical ("Couldn't remove filesink bin from pipeline!");
+        self->file_sink_bin = NULL;
+        g_idle_add (async_destroy_encoder_bin, self);
+
+        return TRUE;
+    }
+}
+
+static gboolean
+mati_detector_destroy_filesink_pipeline (MatiDetector *self)
+{
+    g_message ("Destroying filesink pipeline");
+    g_autoptr (GstPad) pad = gst_element_get_static_pad (self->mux_queue, "src");
+    self->block_pad_id = gst_pad_add_probe (pad,
+                                            GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM,
+                                            on_mux_queue_blocked,
+                                            self, NULL);
 }
 
 static gboolean
@@ -114,15 +273,97 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
         {
             if (GST_MESSAGE_SRC (message) == (GObject *) self->motion)
             {
-                GST_INFO ("motion %s!", self->is_in_motion ? "stopped" : "started");
+                g_message ("motion %s!", self->is_in_motion ? "stopped" : "started");
                 self->is_in_motion = !self->is_in_motion;
-                g_object_set (G_OBJECT (self->valve), "drop", !self->is_in_motion, NULL);
+
+                mati_communicator_emit_motion_event (self->communicator, self->is_in_motion);
+
+                if (self->is_in_motion)
+                    mati_detector_setup_filesink_pipeline (self);
+                else
+                    mati_detector_destroy_filesink_pipeline (self);
             }
         }
         default:
             break;
     }
     return TRUE;
+}
+
+static void
+mati_detector_activate_tcp_client (GObject *obj,
+                                   int      port,
+                                   gpointer user_data)
+{
+    MatiDetector *self = MATI_DETECTOR (user_data);
+    GstElement *encoder_bin;
+    GstElement *tcp_bin;
+    GstElement *complete_bin;
+    g_autofree char *bin_name = NULL;
+    GstGhostPad *video_sink_pad;
+
+    g_message ("Adding tcpclient with port %d to the pipeline!", port);
+
+    encoder_bin = build_encoder_pipeline (self);
+    tcp_bin = build_tcpsink (port);
+    bin_name = g_strdup_printf ("tcpbin_%d", port);
+    complete_bin = GST_ELEMENT (gst_bin_new (bin_name));
+    gst_bin_add_many (GST_BIN (complete_bin), encoder_bin, tcp_bin, NULL);
+
+    g_autoptr (GstIterator) pad_iter = gst_element_iterate_sink_pads (encoder_bin);
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next (pad_iter, &item)) {
+        case GST_ITERATOR_OK:
+            GstPad *sink_pad = g_value_get_object (&item);
+            video_sink_pad = gst_ghost_pad_new ("sink", sink_pad);
+            if (!gst_element_add_pad (complete_bin, video_sink_pad))
+                g_critical ("Failed to set videosink pad in complete tcp bin!");
+            g_value_reset (&item);
+            break;
+        case GST_ITERATOR_RESYNC:
+            g_warning ("iterator resync");
+            gst_iterator_resync (pad_iter);
+            break;
+        case GST_ITERATOR_ERROR:
+            g_warning ("iterator error");
+            done = TRUE;
+            break;
+        case GST_ITERATOR_DONE:
+            done = TRUE;
+            break;
+        }
+    }
+    g_value_unset (&item);
+
+    if (!gst_element_link (encoder_bin, tcp_bin))
+        g_critical ("Couldn't link encoder bin to tcp bin!");
+    gst_bin_add (GST_BIN (self->pipeline), complete_bin);
+    if (!gst_element_link (self->tee, complete_bin))
+        g_critical ("Couldn't link common pipeline to complete tcp bin!");
+
+    gst_element_sync_state_with_parent (complete_bin);
+}
+
+static void
+mati_detector_deactivate_tcp_client (GObject *obj,
+                                     int port,
+                                     gpointer user_data)
+{
+    MatiDetector *self = MATI_DETECTOR (user_data);
+    GstElement *complete_bin;
+    g_autofree char *bin_name = NULL;
+
+    g_message ("Removing tcp client with port %d from the pipeline!", port);
+
+    bin_name = g_strdup_printf ("tcpbin_%d", port);
+    complete_bin = gst_bin_get_by_name (GST_BIN (self->pipeline), bin_name);
+
+    sync_state_change (complete_bin, GST_STATE_NULL, "complete tcp bin");
+    gst_element_unlink (self->tee, complete_bin);
+    if (!gst_bin_remove (GST_BIN (self->pipeline), complete_bin))
+        g_critical ("Couldn't remove complete tcp bin from pipeline!");
 }
 
 MatiDetector *
@@ -139,6 +380,9 @@ mati_detector_new (MatiCommunicator *communicator)
     gst_bus_add_watch (pipeline_bus, on_pipeline_message, self);
 
     self->communicator = communicator;
+
+    g_signal_connect_object (self->communicator, "activate-tcp-client", G_CALLBACK (mati_detector_activate_tcp_client), self, 0);
+    g_signal_connect_object (self->communicator, "deactivate-tcp-client", G_CALLBACK (mati_detector_deactivate_tcp_client), self, 0);
 
     return g_steal_pointer (&self);
 }
@@ -276,6 +520,7 @@ exit:
 static GstElement*
 build_tcpsink (int tcp_port)
 {
+    g_message ("using port %d", tcp_port);
     GstElement *bin, *queue_streamer, *streamer_clientsink;
     GstGhostPad *video_sink_pad;
 
@@ -303,13 +548,22 @@ build_filesink ()
 {
     GstElement *bin, *queue_detector, *writer_detector;
     GstGhostPad *video_sink_pad;
+    g_autoptr (GTimeZone) time_zone = NULL;
+    g_autoptr (GDateTime) date_time = NULL;
+    g_autofree char *date_time_str = NULL;
+    g_autofree char *file_name = NULL;
 
     queue_detector = gst_element_factory_make ("queue", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (queue_detector), FALSE);
 
     writer_detector = gst_element_factory_make ("filesink", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (writer_detector), FALSE);
-    g_object_set (G_OBJECT (writer_detector), "location", "/tmp/test.ogg", NULL);
+    time_zone = g_time_zone_new_local ();
+    date_time = g_date_time_new_now (time_zone);
+    date_time_str =  g_date_time_format (date_time, "%H-%M-%S---%d-%m-%Y");
+    file_name = g_strconcat ("/tmp/", date_time_str, "-test.ogg", NULL);
+    g_message ("saving to %s", file_name);
+    g_object_set (G_OBJECT (writer_detector), "location", file_name, NULL);
 
     bin = gst_bin_new ("filesinkbin");
     gst_bin_add_many (GST_BIN (bin), queue_detector, writer_detector, NULL);
@@ -348,15 +602,17 @@ build_fakesink ()
 }
 
 static GstElement*
-build_encoder_pipeline ()
+build_encoder_pipeline (MatiDetector *self)
 {
     GstElement *bin;
     GstElement *videoconvert;
     GstElement *streamer_encoder;
-    GstElement *streamer_mux;
 
     GstGhostPad *video_sink_pad;
     GstGhostPad *video_src_pad;
+
+    self->encoder_queue = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (self->encoder_queue), FALSE);
 
     videoconvert = gst_element_factory_make ("videoconvert", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videoconvert), FALSE);
@@ -364,22 +620,25 @@ build_encoder_pipeline ()
     streamer_encoder = gst_element_factory_make ("theoraenc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (streamer_encoder), FALSE);
 
-    streamer_mux = gst_element_factory_make ("oggmux", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (streamer_mux), FALSE);
+    self->mux_queue = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (self->mux_queue), FALSE);
+
+    self->mux = gst_element_factory_make ("oggmux", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (self->mux), FALSE);
 
     bin = gst_bin_new ("encoderbin");
     gst_bin_add_many (GST_BIN (bin),
-                      videoconvert, streamer_encoder, streamer_mux,
-                      NULL);
+                      self->encoder_queue, videoconvert, streamer_encoder,
+                      self->mux_queue, self->mux, NULL);
 
-    if (!gst_element_link_many (videoconvert, streamer_encoder, streamer_mux,
-                                NULL))
+    if (!gst_element_link_many (self->encoder_queue, videoconvert, streamer_encoder,
+                                self->mux_queue, self->mux, NULL))
         g_critical ("Couldn't link all encoder elements!");
 
-    video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (videoconvert, "sink"));
+    video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (self->encoder_queue, "sink"));
     if (!gst_element_add_pad (bin, video_sink_pad))
         g_critical ("Failed to set videosink pad in encoder bin!");
-    video_src_pad = gst_ghost_pad_new ("videosrc", gst_element_get_static_pad (streamer_mux, "src"));
+    video_src_pad = gst_ghost_pad_new ("videosrc", gst_element_get_static_pad (self->mux, "src"));
     if (!gst_element_add_pad (bin, video_src_pad))
         g_critical ("Failed to set videosrc pad in encoder bin!");
     
@@ -441,49 +700,22 @@ mati_detector_build (MatiDetector *self,
     g_return_val_if_fail (MATI_IS_DETECTOR (self), FALSE);
 
     GstElement *common_pipeline;
-    GstElement *tee;
     GstElement *fake_sink_bin;
-    GstElement *encoder_bin;
-    GstElement *tee2;
-    GstElement *tcp_bin;
-    GstElement *file_sink_bin;
 
     common_pipeline = build_common_pipeline (self, uri);
-    tee = gst_element_factory_make ("tee", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (tee), FALSE);
+    self->tee = gst_element_factory_make ("tee", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (self->tee), FALSE);
     fake_sink_bin = build_fakesink ();
-    encoder_bin = build_encoder_pipeline ();
-    tee2 = gst_element_factory_make ("tee", NULL);
-    tcp_bin = build_tcpsink (tcp_port);
-    // file_sink_bin = build_filesink ();
 
-    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, tee, fake_sink_bin, encoder_bin, tee2, tcp_bin, /*file_sink_bin,*/ NULL);
+    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, fake_sink_bin, NULL);
     g_message ("about to dump dot");
     dump_dot (self);
 
-    if (!gst_element_link_many (common_pipeline, tee, fake_sink_bin, NULL))
+    if (!gst_element_link_many (common_pipeline, self->tee, fake_sink_bin, NULL))
     {
         g_critical ("Couldn't link common pipeline to fakesinkbin!");
         return FALSE;
     }
-
-    if (!gst_element_link_many (tee, encoder_bin, tee2, NULL))
-    {
-        g_critical ("Couldn't link common pipeline to encoderbin!");
-        return FALSE;
-    }
-
-    if (!gst_element_link_many (tee2, tcp_bin, NULL))
-    {
-        g_critical ("Couldn't link encoderbin to tcp bin!");
-        return FALSE;
-    }
-
-    // if (!gst_element_link_many (tee2, file_sink_bin, NULL))
-    // {
-    //     g_critical ("Couldn't link encoderbin to filesink bin!");
-    //     return FALSE;
-    // }
 
     return TRUE;
 }
