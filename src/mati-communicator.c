@@ -9,10 +9,46 @@ struct _MatiCommunicator
 
 G_DEFINE_TYPE (MatiCommunicator, mati_communicator, MATI_DBUS_TYPE__SKELETON);
 
-void mati_communicator_emit_next_file_signal (MatiCommunicator *self, guint next_number)
+enum
 {
-    g_message ("Emit next file signal with number %d", next_number);
-    mati_dbus__emit_next_upload_file (MATI_DBUS_ (self), next_number);
+    ACTIVATE_TCP_CLIENT,
+    DEACTIVATE_TCP_CLIENT,
+    SIGNAL_LAST
+};
+
+static guint signals[SIGNAL_LAST];
+
+void
+mati_communicator_emit_motion_event (MatiCommunicator *self,
+                                     gboolean          moving)
+{
+    mati_dbus__emit_motion (MATI_DBUS_ (self), moving);
+}
+
+static gboolean
+handle_activate_tcp_client (GObject               *obj,
+                            GDBusMethodInvocation *invoc,
+                            int                    port,
+                            gpointer               user_data)
+{
+    MatiCommunicator *self = MATI_COMMUNICATOR (user_data);
+
+    g_signal_emit (self, signals[ACTIVATE_TCP_CLIENT], 0, port);
+
+    mati_dbus__complete_activate_tcp_client (obj, invoc);
+}
+
+static gboolean
+handle_deactivate_tcp_client (GObject               *obj,
+                              GDBusMethodInvocation *invoc,
+                              int                    port,
+                              gpointer               user_data)
+{
+    MatiCommunicator *self = MATI_COMMUNICATOR (user_data);
+
+    g_signal_emit (self, signals[DEACTIVATE_TCP_CLIENT], 0, port);
+
+    mati_dbus__complete_deactivate_tcp_client (obj, invoc);
 }
 
 static void
@@ -39,6 +75,29 @@ mati_communicator_class_init (MatiCommunicatorClass *klass)
 
     object_class->finalize = mati_communicator_finalize;
     object_class->constructed = mati_communicator_constructed;
+
+    signals[ACTIVATE_TCP_CLIENT] = 
+        g_signal_new ("activate-tcp-client",
+                       MATI_TYPE_COMMUNICATOR,
+                       G_SIGNAL_RUN_LAST,
+                       0,
+                       NULL,
+                       NULL,
+                       NULL,
+                       G_TYPE_NONE,
+                       1,
+                       G_TYPE_INT);
+    signals[DEACTIVATE_TCP_CLIENT] = 
+        g_signal_new ("deactivate-tcp-client",
+                       MATI_TYPE_COMMUNICATOR,
+                       G_SIGNAL_RUN_LAST,
+                       0,
+                       NULL,
+                       NULL,
+                       NULL,
+                       G_TYPE_NONE,
+                       1,
+                       G_TYPE_INT);
 }
 
 static void
@@ -70,6 +129,9 @@ on_connection_acquired (GDBusConnection *connection, const char *name, gpointer 
 
     if (!g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (self), connection, "/com/froura/mati/app", &error))
         g_critical ("Failed to export mati to dbus: %s", error->message);
+
+    g_signal_connect_object (MATI_DBUS_ (self), "handle-activate-tcp-client", G_CALLBACK (handle_activate_tcp_client), self, 0);
+    g_signal_connect_object (MATI_DBUS_ (self), "handle-deactivate-tcp-client", G_CALLBACK (handle_deactivate_tcp_client), self, 0);
 }
 
 MatiCommunicator *
