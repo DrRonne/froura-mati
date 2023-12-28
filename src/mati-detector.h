@@ -1,6 +1,7 @@
 #pragma once
 
 #include <glib.h>
+#include <json-glib/json-glib.h>
 #include <gio/gio.h>
 #include <gst/gst.h>
 
@@ -18,5 +19,7 @@ void mati_detector_start (MatiDetector *self);
 GstStateChangeReturn mati_detector_stop (MatiDetector *self);
 
 gboolean mati_detector_build (MatiDetector *self, gchar *uri, gboolean clockoverlay, int tcp_port);
+
+JsonNode* mati_detector_get_diagnostics (MatiDetector *self);
 
 G_END_DECLS

@@ -5,6 +5,7 @@ struct _MatiCommunicator
    MatiDbusSkeleton parent_instance;
 
    guint dbus_owner_id;
+   MatiApplication *app;
 };
 
 G_DEFINE_TYPE (MatiCommunicator, mati_communicator, MATI_DBUS_TYPE__SKELETON);
@@ -49,6 +50,17 @@ handle_deactivate_tcp_client (GObject               *obj,
     g_signal_emit (self, signals[DEACTIVATE_TCP_CLIENT], 0, port);
 
     mati_dbus__complete_deactivate_tcp_client (obj, invoc);
+}
+
+static gboolean
+handle_get_diagnostics (GObject               *obj,
+                        GDBusMethodInvocation *invoc,
+                        gpointer               user_data)
+{
+    MatiCommunicator *self = MATI_COMMUNICATOR (user_data);
+    g_autofree char *diag_str = mati_application_get_diagnostics (self->app);
+
+    mati_dbus__complete_get_diagnostics (obj, invoc, diag_str);
 }
 
 static void
@@ -132,10 +144,12 @@ on_connection_acquired (GDBusConnection *connection, const char *name, gpointer 
 
     g_signal_connect_object (MATI_DBUS_ (self), "handle-activate-tcp-client", G_CALLBACK (handle_activate_tcp_client), self, 0);
     g_signal_connect_object (MATI_DBUS_ (self), "handle-deactivate-tcp-client", G_CALLBACK (handle_deactivate_tcp_client), self, 0);
+    g_signal_connect_object (MATI_DBUS_ (self), "handle-get-diagnostics", G_CALLBACK (handle_get_diagnostics), self, 0);
 }
 
 MatiCommunicator *
-mati_communicator_new (const char *mati_id)
+mati_communicator_new (const char      *mati_id,
+                       MatiApplication *app)
 {
     MatiCommunicator *self;
     g_autofree char *dbus_name = NULL;
@@ -144,6 +158,7 @@ mati_communicator_new (const char *mati_id)
 
     dbus_name = g_strdup_printf ("com.froura.mati.app_%s", mati_id);
     self->dbus_owner_id = g_bus_own_name (G_BUS_TYPE_SESSION, dbus_name, 0, on_connection_acquired, on_name_acquired, on_name_lost, self, NULL);
+    self->app = app;
 
     return self;
 }

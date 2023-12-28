@@ -8,6 +8,7 @@ project('mati', 'c',
 gnome = import('gnome')
 
 glib = dependency('glib-2.0')
+glib_json = dependency('json-glib-1.0')
 gio = dependency('gio-2.0')
 gio_os = dependency('gio-unix-2.0')
 gstreamer = dependency('gstreamer-1.0')

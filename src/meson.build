@@ -7,6 +7,7 @@ mati_sources = files(
 
 mati_dependencies = [
     glib,
+    glib_json,
     gio,
     gio_os,
     gstreamer,

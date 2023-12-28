@@ -3,6 +3,7 @@
 #include <glib.h>
 #include <glib-object.h>
 
+#include "mati-application.h"
 #include "froura-mati-dbus-proxy.h"
 
 G_BEGIN_DECLS
@@ -15,6 +16,7 @@ mati_communicator_emit_motion_event (MatiCommunicator *self,
                                      gboolean          moving);
 
 MatiCommunicator *
-mati_communicator_new (const char *mati_id);
+mati_communicator_new (const char      *mati_id,
+                       MatiApplication *app);
 
 G_END_DECLS

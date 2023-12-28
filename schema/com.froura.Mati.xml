@@ -27,6 +27,16 @@
         </method>
 
         <!--
+            GetDiagnostics:
+            @diagnostics: diagnostics of the application
+
+            Method that returns diagnostics of the application
+        -->
+        <method name="GetDiagnostics">
+            <arg direction="out" type="s" name="diagnostics"/>
+        </method>
+
+        <!--
             motion:
             @moving: true if motion started, false if motion stopped
 

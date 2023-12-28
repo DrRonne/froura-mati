@@ -9,6 +9,8 @@ G_BEGIN_DECLS
 
 G_DECLARE_FINAL_TYPE (MatiApplication, mati_application, MATI, APPLICATION, GApplication);
 
+const char* mati_application_get_diagnostics (MatiApplication *self);
+
 MatiApplication* mati_application_new (int argc, char* argv[]);
 
 G_END_DECLS

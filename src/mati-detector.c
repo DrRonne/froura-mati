@@ -1,5 +1,13 @@
 #include "mati-detector.h"
 
+#define TCP_BIN_SUBNAME "tcpbin_"
+#define TCP_BIN_SUBNAME_LENGTH 7
+#define TCP_CLIENT_NAME "tcpclientsink"
+#define TCP_SUBBIN_NAME "tcpsinkbin"
+#define ENCODER_ELEMENT_NAME "encoder"
+#define DECODEBIN_NAME "uridecodebin"
+#define FILESINK_NAME "filesink"
+
 GST_DEBUG_CATEGORY_STATIC (mati_detector_debug);
 
 struct _MatiDetector
@@ -306,7 +314,7 @@ mati_detector_activate_tcp_client (GObject *obj,
 
     encoder_bin = build_encoder_pipeline (self);
     tcp_bin = build_tcpsink (port);
-    bin_name = g_strdup_printf ("tcpbin_%d", port);
+    bin_name = g_strdup_printf ("%s%d", TCP_BIN_SUBNAME, port);
     complete_bin = GST_ELEMENT (gst_bin_new (bin_name));
     gst_bin_add_many (GST_BIN (complete_bin), encoder_bin, tcp_bin, NULL);
 
@@ -357,7 +365,7 @@ mati_detector_deactivate_tcp_client (GObject *obj,
 
     g_message ("Removing tcp client with port %d from the pipeline!", port);
 
-    bin_name = g_strdup_printf ("tcpbin_%d", port);
+    bin_name = g_strdup_printf ("%s%d", TCP_BIN_SUBNAME, port);
     complete_bin = gst_bin_get_by_name (GST_BIN (self->pipeline), bin_name);
 
     sync_state_change (complete_bin, GST_STATE_NULL, "complete tcp bin");
@@ -530,8 +538,9 @@ build_tcpsink (int tcp_port)
     streamer_clientsink = gst_element_factory_make ("tcpclientsink", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (streamer_clientsink), FALSE);
     g_object_set (G_OBJECT (streamer_clientsink), "host", "localhost", "port", tcp_port, NULL);
+    gst_element_set_name (streamer_clientsink, TCP_CLIENT_NAME);
 
-    bin = gst_bin_new ("tcpsinkbin");
+    bin = gst_bin_new (TCP_SUBBIN_NAME);
     gst_bin_add_many (GST_BIN (bin), queue_streamer, streamer_clientsink, NULL);
     if (!gst_element_link (queue_streamer, streamer_clientsink))
         g_critical ("Failed to link tcpsink elements!");
@@ -564,6 +573,7 @@ build_filesink ()
     file_name = g_strconcat ("/tmp/", date_time_str, "-test.ogg", NULL);
     g_message ("saving to %s", file_name);
     g_object_set (G_OBJECT (writer_detector), "location", file_name, NULL);
+    gst_element_set_name (writer_detector, FILESINK_NAME);
 
     bin = gst_bin_new ("filesinkbin");
     gst_bin_add_many (GST_BIN (bin), queue_detector, writer_detector, NULL);
@@ -619,6 +629,7 @@ build_encoder_pipeline (MatiDetector *self)
 
     streamer_encoder = gst_element_factory_make ("theoraenc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (streamer_encoder), FALSE);
+    gst_element_set_name (streamer_encoder, ENCODER_ELEMENT_NAME);
 
     self->mux_queue = gst_element_factory_make ("queue", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (self->mux_queue), FALSE);
@@ -661,6 +672,7 @@ build_common_pipeline (MatiDetector *self,
     videosource = gst_element_factory_make ("uridecodebin", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videosource), FALSE);
     g_object_set (G_OBJECT (videosource), "uri", uri, NULL);
+    gst_element_set_name (videosource, DECODEBIN_NAME);
     g_signal_connect (videosource, "pad-added", G_CALLBACK (pad_added_handler), self);
 
     queue_common = gst_element_factory_make ("queue", NULL);
@@ -718,4 +730,132 @@ mati_detector_build (MatiDetector *self,
     }
 
     return TRUE;
+}
+
+JsonNode *
+mati_detector_get_diagnostics (MatiDetector *self)
+{
+    JsonNode *json_node = json_node_alloc ();
+    JsonObject *diagnostics_object = json_object_new ();
+    JsonObject *decoder_object = json_object_new ();
+    JsonArray *tcp_bins_active = json_array_new ();
+    g_autoptr (GstElement) decodebin = gst_bin_get_by_name (self->pipeline, DECODEBIN_NAME);
+    int tcp_bins = 0;
+    gint64 bufferduration, connectionspeed, ringbuffermaxsize;
+    int buffersize;
+    g_autofree char *uri;
+    gboolean forceswdecoders, usebuffering;
+
+    g_autoptr (GstIterator) iter = gst_bin_iterate_elements (GST_BIN (self->pipeline));
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next (iter, &item)) {
+        case GST_ITERATOR_OK:
+            GstElement *item_element = g_value_get_object (&item);
+            if (GST_IS_BIN (item_element))
+            {
+                GstBin *item_bin = GST_BIN (item_element);
+                g_autofree char *name = gst_element_get_name (item_element);
+                g_autofree char *sub_name = g_strndup (name, TCP_BIN_SUBNAME_LENGTH);
+                tcp_bins += 1;
+
+                if (g_strcmp0 (sub_name, TCP_BIN_SUBNAME) == 0)
+                {
+                    g_autoptr (GstElement) tcpclient = gst_bin_get_by_name (item_bin, TCP_CLIENT_NAME);
+                    g_autoptr (GstElement) encoder = gst_bin_get_by_name (item_bin, ENCODER_ELEMENT_NAME);
+                    int port, bitrate, quality, ratebuffer, speedlevel;
+                    g_autofree char *host;
+                    gboolean dropframes;
+                    JsonObject* json_object = json_object_new ();
+
+                    g_object_get (tcpclient,
+                                  "port", &port,
+                                  "host", &host, NULL);
+                    g_object_get (encoder,
+                                  "bitrate", &bitrate,
+                                  "drop-frames", &dropframes,
+                                  "quality", &quality,
+                                  "rate-buffer", &ratebuffer,
+                                  "speed-level", &speedlevel, NULL);
+                    json_object_set_int_member (json_object, "port", port);
+                    json_object_set_int_member (json_object, "quality", quality);
+                    json_object_set_int_member (json_object, "ratebuffer", ratebuffer);
+                    json_object_set_int_member (json_object, "bitrate", bitrate);
+                    json_object_set_int_member (json_object, "speedlevel", speedlevel);
+                    json_object_set_string_member (json_object, "host", host);
+                    json_object_set_boolean_member (json_object, "drop-frames", dropframes);
+                    json_array_add_object_element (tcp_bins_active, json_object);
+                }
+            }
+            g_value_reset (&item);
+            break;
+        case GST_ITERATOR_RESYNC:
+            g_warning ("iterator resync");
+            gst_iterator_resync (iter);
+            break;
+        case GST_ITERATOR_ERROR:
+            g_warning ("iterator error");
+            done = TRUE;
+            break;
+        case GST_ITERATOR_DONE:
+            done = TRUE;
+            break;
+        }
+    }
+    g_value_unset (&item);
+
+    g_object_get (decodebin,
+                  "buffer-duration", &bufferduration,
+                  "buffer-size", &buffersize,
+                  "connection-speed", &connectionspeed,
+                  "force-sw-decoders", &forceswdecoders,
+                  "ring-buffer-max-size", &ringbuffermaxsize,
+                  "uri", &uri, 
+                  "use-buffering", &usebuffering, NULL);
+    json_object_set_int_member (decoder_object, "buffer-duration", bufferduration);
+    json_object_set_int_member (decoder_object, "buffer-size", buffersize);
+    json_object_set_int_member (decoder_object, "connection-speed", connectionspeed);
+    json_object_set_int_member (decoder_object, "ring-buffer-max-size", ringbuffermaxsize);
+    json_object_set_string_member (decoder_object, "uri", uri);
+    json_object_set_boolean_member (decoder_object, "use-buffering", usebuffering);
+    json_object_set_boolean_member (decoder_object, "force-sw-decoders", forceswdecoders);
+
+    json_object_set_boolean_member (diagnostics_object, "is-in-motion", self->is_in_motion);
+    json_object_set_object_member (diagnostics_object, "decoder", decoder_object);
+    json_object_set_array_member (diagnostics_object, "active-tcp-bins", tcp_bins_active);
+
+    if (self->is_in_motion)
+    {
+        JsonObject *filesink_object = json_object_new ();
+        g_autoptr (GstElement) encoder = gst_bin_get_by_name (self->encoder_bin, ENCODER_ELEMENT_NAME);
+        g_autoptr (GstElement) filesink = gst_bin_get_by_name (self->file_sink_bin, FILESINK_NAME);
+        int bitrate, quality, ratebuffer, speedlevel, filesink_buffersize;
+        g_autofree *filelocation;
+        gboolean dropframes;
+        JsonObject* json_object = json_object_new ();
+
+        g_object_get (encoder,
+                      "bitrate", &bitrate,
+                      "drop-frames", &dropframes,
+                      "quality", &quality,
+                      "rate-buffer", &ratebuffer,
+                      "speed-level", &speedlevel, NULL);
+
+        g_object_get (filesink,
+                      "buffer-size", &filesink_buffersize,
+                      "location", &filelocation, NULL);
+
+        json_object_set_int_member (filesink_object, "quality", quality);
+        json_object_set_int_member (filesink_object, "ratebuffer", ratebuffer);
+        json_object_set_int_member (filesink_object, "bitrate", bitrate);
+        json_object_set_int_member (filesink_object, "speedlevel", speedlevel);
+        json_object_set_boolean_member (filesink_object, "drop-frames", dropframes);
+        json_object_set_int_member (filesink_object, "filesink-buffer-size", filesink_buffersize);
+        json_object_set_string_member (filesink_object, "file-location", filelocation);
+
+        json_object_set_object_member (diagnostics_object, "decoder", filesink_object);
+    }
+
+    return json_node_init_object (json_node, diagnostics_object);
 }

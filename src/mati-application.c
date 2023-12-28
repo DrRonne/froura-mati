@@ -38,7 +38,7 @@ mati_application_activate (GApplication *app)
 {
     MatiApplication *self = MATI_APPLICATION (app);
 
-    self->communicator = mati_communicator_new (mati_options_get_id(self->options));
+    self->communicator = mati_communicator_new (mati_options_get_id(self->options), self);
 
     self->detector = mati_detector_new (self->communicator);
     if (self->detector == NULL)
@@ -75,6 +75,14 @@ mati_application_class_init (MatiApplicationClass *klass)
 
     gapplication_class->activate = mati_application_activate;
     gapplication_class->shutdown = mati_application_shutdown;
+}
+
+const char *
+mati_application_get_diagnostics (MatiApplication *self)
+{
+    g_autoptr (JsonNode) diagnostics = mati_detector_get_diagnostics (self->detector);
+
+    return json_to_string (diagnostics, FALSE);
 }
 
 MatiApplication *
