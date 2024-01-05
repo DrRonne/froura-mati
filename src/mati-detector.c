@@ -854,7 +854,7 @@ mati_detector_get_diagnostics (MatiDetector *self)
         json_object_set_int_member (filesink_object, "filesink-buffer-size", filesink_buffersize);
         json_object_set_string_member (filesink_object, "file-location", filelocation);
 
-        json_object_set_object_member (diagnostics_object, "decoder", filesink_object);
+        json_object_set_object_member (diagnostics_object, "active-file-bin", filesink_object);
     }
 
     return json_node_init_object (json_node, diagnostics_object);
