@@ -627,14 +627,14 @@ build_encoder_pipeline (MatiDetector *self)
     videoconvert = gst_element_factory_make ("videoconvert", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videoconvert), FALSE);
 
-    streamer_encoder = gst_element_factory_make ("theoraenc", NULL);
+    streamer_encoder = gst_element_factory_make ("vp8enc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (streamer_encoder), FALSE);
     gst_element_set_name (streamer_encoder, ENCODER_ELEMENT_NAME);
 
     self->mux_queue = gst_element_factory_make ("queue", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (self->mux_queue), FALSE);
 
-    self->mux = gst_element_factory_make ("oggmux", NULL);
+    self->mux = gst_element_factory_make ("webmmux", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (self->mux), FALSE);
 
     bin = gst_bin_new ("encoderbin");
