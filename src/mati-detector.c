@@ -7,6 +7,9 @@
 #define ENCODER_ELEMENT_NAME "encoder"
 #define DECODEBIN_NAME "uridecodebin"
 #define FILESINK_NAME "filesink"
+#define DECODE_FRAME_TIMEOUT 10000
+#define PAUSED 3
+#define PLAYING 4
 
 GST_DEBUG_CATEGORY_STATIC (mati_detector_debug);
 
@@ -30,6 +33,10 @@ struct _MatiDetector
     GstElement *mux;
     GstElement *motion;
 
+    gint64 last_frame_buffer;
+    gdouble framerate;
+    guint frame_timeout;
+
     gulong block_pad_id;
 };
 
@@ -39,8 +46,8 @@ enum MatiDetectorSignals
 {
     EOS_MESSAGE,
     PIPELINE_ERROR,
-    PENDING,
-    PLAYING,
+    MATI_PENDING,
+    MATI_PLAYING,
     LAST
 };
 
@@ -51,12 +58,16 @@ GstStateChangeReturn mati_detector_stop (MatiDetector *self);
 static GstElement* build_encoder_pipeline ();
 static GstElement* build_filesink ();
 static GstElement* build_tcpsink (int tcp_port);
+static gboolean decode_frame_timeout (MatiDetector *self);
 
 static void
 mati_detector_init (MatiDetector *self)
 {
     self->is_in_motion = FALSE;
     self->file_sink_bin = NULL;
+    self->framerate = 0;
+    self->last_frame_buffer = 0;
+    self->frame_timeout = g_timeout_add (DECODE_FRAME_TIMEOUT, decode_frame_timeout, self);
 }
 
 static void
@@ -89,8 +100,8 @@ mati_detector_class_init (MatiDetectorClass *klass)
 
     signals[EOS_MESSAGE] = g_signal_new ("eos", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
     signals[PIPELINE_ERROR] = g_signal_new ("error", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 2, GST_TYPE_ELEMENT, G_TYPE_STRING);
-    signals[PENDING] = g_signal_new ("pending", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
-    signals[PLAYING] = g_signal_new ("playing", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+    signals[MATI_PENDING] = g_signal_new ("pending", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
+    signals[MATI_PLAYING] = g_signal_new ("playing", MATI_TYPE_DETECTOR, G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 }
 
 static gboolean
@@ -273,6 +284,24 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
 
                 gst_message_parse_state_changed (message, &old_state, &new_state, NULL);
                 GST_INFO ("Pipeline went from state %s to state %s", gst_element_state_get_name (old_state), gst_element_state_get_name (new_state));
+                switch (new_state)
+                {
+                    case PAUSED:
+                    {
+                        mati_communicator_emit_state_changed (self->communicator, MATI_STATE_PAUSED);
+                        ;
+                    }
+                    case PLAYING:
+                    {
+                        mati_communicator_emit_state_changed (self->communicator, MATI_STATE_PLAYING);
+                        break;
+                    }
+                    default:
+                    {
+                        mati_communicator_emit_state_changed (self->communicator, MATI_STATE_STOPPED);
+                        break;
+                    }
+                }
                 GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/pipeline");
             }
             break;
@@ -410,6 +439,7 @@ mati_detector_start (MatiDetector *self)
     {
         case GST_STATE_CHANGE_SUCCESS:
         {
+            mati_communicator_emit_state_changed (self->communicator, MATI_STATE_PLAYING);
             GST_INFO ("Pipeline state succesfully changed to playing!");
             change_success = TRUE;
             break;
@@ -434,7 +464,7 @@ mati_detector_start (MatiDetector *self)
             break;
     }
     if (change_success)
-        g_signal_emit (self, signals[PENDING], 0);
+        g_signal_emit (self, signals[MATI_PENDING], 0);
 }
 
 GstStateChangeReturn
@@ -482,6 +512,32 @@ dump_dot (MatiDetector *self)
 {
     g_message ("dumping dot");
     GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/pipeline");
+    return TRUE;
+}
+
+static gboolean
+decode_frame_timeout (MatiDetector *self)
+{
+    g_critical ("Frame timeout reached!");
+    mati_communicator_emit_state_changed (self->communicator, MATI_STATE_STOPPED);
+    return FALSE;
+}
+
+static GstPadProbeReturn
+decode_frame_probe_cb (GstPad          *pad,
+                       GstPadProbeInfo *info,
+                       gpointer         user_data)
+{
+    MatiDetector *self = MATI_DETECTOR (user_data);
+
+    gint64 previous_frame_buffer = self->last_frame_buffer;
+    self->last_frame_buffer = g_get_monotonic_time ();
+    self->framerate = 1 / ((double) (self->last_frame_buffer - previous_frame_buffer) / 1000000);
+
+    g_source_remove (self->frame_timeout);
+    self->frame_timeout = g_timeout_add (DECODE_FRAME_TIMEOUT, decode_frame_timeout, self);
+
+    return GST_PAD_PROBE_OK;
 }
 
 static void
@@ -518,6 +574,9 @@ pad_added_handler (GstElement *src, GstPad *new_pad, MatiDetector *self)
     {
         g_message ("Link succeeded (type '%s').\n", new_pad_type);
     }
+
+    g_message ("adding pad probe");
+    gst_pad_add_probe(new_pad, GST_PAD_PROBE_TYPE_BUFFER, decode_frame_probe_cb, self, NULL);
 
     g_timeout_add (10000, dump_dot, self);
 
@@ -820,6 +879,8 @@ mati_detector_get_diagnostics (MatiDetector *self)
     json_object_set_string_member (decoder_object, "uri", uri);
     json_object_set_boolean_member (decoder_object, "use-buffering", usebuffering);
     json_object_set_boolean_member (decoder_object, "force-sw-decoders", forceswdecoders);
+    json_object_set_double_member (decoder_object, "framerate", self->framerate);
+    json_object_set_int_member (decoder_object, "last-frame-buffer", self->last_frame_buffer);
 
     json_object_set_boolean_member (diagnostics_object, "is-in-motion", self->is_in_motion);
     json_object_set_object_member (diagnostics_object, "decoder", decoder_object);

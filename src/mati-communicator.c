@@ -26,6 +26,13 @@ mati_communicator_emit_motion_event (MatiCommunicator *self,
     mati_dbus__emit_motion (MATI_DBUS_ (self), moving);
 }
 
+void
+mati_communicator_emit_state_changed (MatiCommunicator *self,
+                                      enum MatiState    state)
+{
+    mati_dbus__emit_state_changed (MATI_DBUS_ (self), state);
+}
+
 static gboolean
 handle_activate_tcp_client (GObject               *obj,
                             GDBusMethodInvocation *invoc,

@@ -45,5 +45,19 @@
         <signal name="motion">
             <arg name="moving" type="b" />
         </signal>
+
+        <!--
+            motion:
+            @state: true if motion started, false if motion stopped
+             * 0: stopped
+             * 1: pending
+             * 2: paused
+             * 3: playing
+
+            Signal that triggers when mati detects motion
+        -->
+        <signal name="StateChanged">
+            <arg name="state" type="i" />
+        </signal>
     </interface>
 </node>
