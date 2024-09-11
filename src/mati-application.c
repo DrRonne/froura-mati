@@ -20,6 +20,9 @@ G_DEFINE_TYPE (MatiApplication, mati_application, G_TYPE_APPLICATION);
 static void
 mati_application_init (MatiApplication *self)
 {
+    self->detector = NULL;
+    self->communicator = NULL;
+    self->options = NULL;
 }
 
 static void
@@ -44,7 +47,7 @@ mati_application_activate (GApplication *app)
     if (self->detector == NULL)
         return;
     
-    if (!mati_detector_build (self->detector, mati_options_get_uri(self->options), mati_options_get_clockoverlay(self->options), mati_options_get_tcp_port(self->options)))
+    if (!mati_detector_build (self->detector, mati_options_get_uri(self->options)))
     {
         g_critical ("Could not build detector pipeline!");
         return;

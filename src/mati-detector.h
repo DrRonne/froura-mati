@@ -18,7 +18,7 @@ void mati_detector_start (MatiDetector *self);
 
 GstStateChangeReturn mati_detector_stop (MatiDetector *self);
 
-gboolean mati_detector_build (MatiDetector *self, gchar *uri, gboolean clockoverlay, int tcp_port);
+gboolean mati_detector_build (MatiDetector *self, gchar *uri);
 
 JsonNode* mati_detector_get_diagnostics (MatiDetector *self);
 

@@ -764,9 +764,7 @@ build_common_pipeline (MatiDetector *self,
 
 gboolean
 mati_detector_build (MatiDetector *self,
-                     gchar        *uri,
-                     gboolean      clockoverlay,
-                     int           tcp_port)
+                     gchar        *uri)
 {
     g_return_val_if_fail (MATI_IS_DETECTOR (self), FALSE);
 

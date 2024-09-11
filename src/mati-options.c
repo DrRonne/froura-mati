@@ -6,8 +6,6 @@ struct _MatiOptions
 
     gchar *id;
     gchar *uri;
-    gboolean clockoverlay;
-    int tcp_port;
 };
 
 G_DEFINE_TYPE (MatiOptions, mati_options, G_TYPE_OBJECT);
@@ -16,14 +14,13 @@ G_DEFINE_TYPE (MatiOptions, mati_options, G_TYPE_OBJECT);
 static void
 mati_options_init (MatiOptions *self)
 {
-
+    self->id = "";
+    self->uri = "";
 }
 
 static void
 mati_options_finalize (GObject *object)
 {
-    MatiOptions *self = MATI_OPTIONS (object);
-
     G_OBJECT_CLASS (mati_options_parent_class)->finalize (object);
 }
 
@@ -48,12 +45,6 @@ mati_options_read (MatiOptions *self, int *argc, char **argv[], GError **err)
         },
         {
             "id", 0, 0, G_OPTION_ARG_STRING, &self->id, "ID of the stream", "camera_livingroom"
-        },
-        {
-            "clockoverlay", 0, 0, G_OPTION_ARG_NONE, &self->clockoverlay, "This flag will add a clockoverlay to the recorded video", NULL
-        },
-        {
-            "tcp-port", 0, 0, G_OPTION_ARG_INT, &self->tcp_port, "The tcp port that the video will be streamed to", NULL
         },
         { NULL }
     };
@@ -85,18 +76,6 @@ mati_options_get_id (MatiOptions *self)
     return self->id;
 }
 
-gboolean
-mati_options_get_clockoverlay (MatiOptions *self)
-{
-    return self->clockoverlay;
-}
-
-int
-mati_options_get_tcp_port (MatiOptions *self)
-{
-    return self->tcp_port;
-}
-
 MatiOptions *
 mati_options_new ()
 {
@@ -104,6 +83,6 @@ mati_options_new ()
 
     self->id = NULL;
     self->uri = NULL;
-    self->clockoverlay = FALSE;
-    self->tcp_port=0;
+
+    return self;
 }

@@ -13,7 +13,5 @@ gboolean mati_options_read (MatiOptions *self, int *argc, char **argv[], GError 
 
 gchar *mati_options_get_uri (MatiOptions *self);
 gchar *mati_options_get_id (MatiOptions *self);
-gboolean mati_options_get_clockoverlay (MatiOptions *self);
-int mati_options_get_tcp_port (MatiOptions *self);
 
 G_END_DECLS
