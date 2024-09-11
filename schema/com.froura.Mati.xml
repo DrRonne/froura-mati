@@ -5,28 +5,6 @@
     <interface name="com.froura.mati">
 
         <!--
-            ActivateTcpClient:
-            @port: Port to be used by the tcp client
-
-            Method that activates the tcp client so the video can be watched
-            remotely.
-        -->
-        <method name="ActivateTcpClient">
-            <arg direction="in" type="i" name="port"/>
-        </method>
-
-        <!--
-            DeactivateTcpClient:
-            @port: Port to be used by the tcp client
-
-            Method that deactivates the tcp client so the pipeline stops
-            sending the video over the network.
-        -->
-        <method name="DeactivateTcpClient">
-            <arg direction="in" type="i" name="port"/>
-        </method>
-
-        <!--
             GetDiagnostics:
             @diagnostics: diagnostics of the application
 
@@ -47,7 +25,7 @@
         </signal>
 
         <!--
-            motion:
+            StateChanged:
             @state: true if motion started, false if motion stopped
              * 0: stopped
              * 1: pending
@@ -58,6 +36,20 @@
         -->
         <signal name="StateChanged">
             <arg name="state" type="i" />
+        </signal>
+
+        <!--
+            PeerId:
+            @state: true if motion started, false if motion stopped
+             * 0: stopped
+             * 1: pending
+             * 2: paused
+             * 3: playing
+
+            Signal that triggers when mati detects motion
+        -->
+        <signal name="PeerId">
+            <arg name="peerid" type="s" />
         </signal>
     </interface>
 </node>

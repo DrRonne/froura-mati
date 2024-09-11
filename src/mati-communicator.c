@@ -10,15 +10,6 @@ struct _MatiCommunicator
 
 G_DEFINE_TYPE (MatiCommunicator, mati_communicator, MATI_DBUS_TYPE__SKELETON);
 
-enum
-{
-    ACTIVATE_TCP_CLIENT,
-    DEACTIVATE_TCP_CLIENT,
-    SIGNAL_LAST
-};
-
-static guint signals[SIGNAL_LAST];
-
 void
 mati_communicator_emit_motion_event (MatiCommunicator *self,
                                      gboolean          moving)
@@ -33,39 +24,20 @@ mati_communicator_emit_state_changed (MatiCommunicator *self,
     mati_dbus__emit_state_changed (MATI_DBUS_ (self), state);
 }
 
-static gboolean
-handle_activate_tcp_client (GObject               *obj,
-                            GDBusMethodInvocation *invoc,
-                            int                    port,
-                            gpointer               user_data)
+void
+mati_communicator_emit_peer_id (MatiCommunicator *self,
+                                char             *peer_id)
 {
-    MatiCommunicator *self = MATI_COMMUNICATOR (user_data);
-
-    g_signal_emit (self, signals[ACTIVATE_TCP_CLIENT], 0, port);
-
-    mati_dbus__complete_activate_tcp_client (obj, invoc);
+    mati_dbus__emit_peer_id (MATI_DBUS_ (self), peer_id);
 }
 
 static gboolean
-handle_deactivate_tcp_client (GObject               *obj,
-                              GDBusMethodInvocation *invoc,
-                              int                    port,
-                              gpointer               user_data)
-{
-    MatiCommunicator *self = MATI_COMMUNICATOR (user_data);
-
-    g_signal_emit (self, signals[DEACTIVATE_TCP_CLIENT], 0, port);
-
-    mati_dbus__complete_deactivate_tcp_client (obj, invoc);
-}
-
-static gboolean
-handle_get_diagnostics (GObject               *obj,
+handle_get_diagnostics (MatiDbus              *obj,
                         GDBusMethodInvocation *invoc,
                         gpointer               user_data)
 {
     MatiCommunicator *self = MATI_COMMUNICATOR (user_data);
-    g_autofree char *diag_str = mati_application_get_diagnostics (self->app);
+    g_autofree const char *diag_str = mati_application_get_diagnostics (self->app);
 
     mati_dbus__complete_get_diagnostics (obj, invoc, diag_str);
 }
@@ -81,10 +53,10 @@ mati_communicator_finalize (GObject *object)
 }
 
 static void
-mati_communicator_constructed (GObject *object)
+mati_communicator_init (MatiCommunicator *self)
 {
-    // Set initial values to dbus properties, connect method callbacks etc
-    // g_signal_connect (object, "handle-method-x", G_CALLBACK (handle_method_x), NULL);
+    self->dbus_owner_id = 0;
+    self->app = NULL;
 }
 
 static void
@@ -93,36 +65,7 @@ mati_communicator_class_init (MatiCommunicatorClass *klass)
     GObjectClass *object_class = G_OBJECT_CLASS (klass);
 
     object_class->finalize = mati_communicator_finalize;
-    object_class->constructed = mati_communicator_constructed;
-
-    signals[ACTIVATE_TCP_CLIENT] = 
-        g_signal_new ("activate-tcp-client",
-                       MATI_TYPE_COMMUNICATOR,
-                       G_SIGNAL_RUN_LAST,
-                       0,
-                       NULL,
-                       NULL,
-                       NULL,
-                       G_TYPE_NONE,
-                       1,
-                       G_TYPE_INT);
-    signals[DEACTIVATE_TCP_CLIENT] = 
-        g_signal_new ("deactivate-tcp-client",
-                       MATI_TYPE_COMMUNICATOR,
-                       G_SIGNAL_RUN_LAST,
-                       0,
-                       NULL,
-                       NULL,
-                       NULL,
-                       G_TYPE_NONE,
-                       1,
-                       G_TYPE_INT);
-}
-
-static void
-mati_communicator_init (MatiCommunicator *self)
-{
-
+    // object_class->constructed = mati_communicator_constructed;
 }
 
 static void
@@ -149,8 +92,6 @@ on_connection_acquired (GDBusConnection *connection, const char *name, gpointer 
     if (!g_dbus_interface_skeleton_export (G_DBUS_INTERFACE_SKELETON (self), connection, "/com/froura/mati/app", &error))
         g_critical ("Failed to export mati to dbus: %s", error->message);
 
-    g_signal_connect_object (MATI_DBUS_ (self), "handle-activate-tcp-client", G_CALLBACK (handle_activate_tcp_client), self, 0);
-    g_signal_connect_object (MATI_DBUS_ (self), "handle-deactivate-tcp-client", G_CALLBACK (handle_deactivate_tcp_client), self, 0);
     g_signal_connect_object (MATI_DBUS_ (self), "handle-get-diagnostics", G_CALLBACK (handle_get_diagnostics), self, 0);
 }
 

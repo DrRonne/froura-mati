@@ -27,6 +27,10 @@ void
 mati_communicator_emit_state_changed (MatiCommunicator *self,
                                       enum MatiState    state);
 
+void
+mati_communicator_emit_peer_id (MatiCommunicator *self,
+                                char             *peer_id);
+
 MatiCommunicator *
 mati_communicator_new (const char      *mati_id,
                        MatiApplication *app);
