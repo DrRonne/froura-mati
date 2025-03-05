@@ -41,13 +41,14 @@ mati_application_activate (GApplication *app)
 {
     MatiApplication *self = MATI_APPLICATION (app);
 
-    self->communicator = mati_communicator_new (mati_options_get_id(self->options), self);
+    self->communicator = mati_communicator_new (mati_options_get_id (self->options), self);
 
-    self->detector = mati_detector_new (self->communicator);
+    self->detector = mati_detector_new (self->communicator,
+                                        mati_options_get_id (self->options));
     if (self->detector == NULL)
         return;
     
-    if (!mati_detector_build (self->detector, mati_options_get_uri(self->options)))
+    if (!mati_detector_build (self->detector, mati_options_get_uri (self->options)))
     {
         g_critical ("Could not build detector pipeline!");
         return;

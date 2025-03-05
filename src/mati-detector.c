@@ -39,6 +39,8 @@ struct _MatiDetector
     gulong block_pad_id;
 
     char *peer_id;
+
+    char *source_id;
 };
 
 G_DEFINE_TYPE (MatiDetector, mati_detector, G_TYPE_OBJECT);
@@ -294,11 +296,13 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
 }
 
 MatiDetector *
-mati_detector_new (MatiCommunicator *communicator)
+mati_detector_new (MatiCommunicator *communicator,
+                   char             *source_id)
 {
     g_autoptr (MatiDetector) self = g_object_new (MATI_TYPE_DETECTOR, NULL);
     g_autoptr (GstBus) pipeline_bus = NULL;
 
+    self->source_id = source_id;
     self->pipeline = gst_pipeline_new ("mati");
     if (self->pipeline == NULL)
         return NULL;
