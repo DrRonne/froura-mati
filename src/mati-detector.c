@@ -831,6 +831,13 @@ mati_detector_get_diagnostics (MatiDetector *self)
     JsonObject *decoder_object = json_object_new ();
     g_autoptr (GstElement) rtspsrc = gst_bin_get_by_name (GST_BIN (self->pipeline), RTSPSRC_NAME);
     g_autoptr (GstElement) webrtcsink = gst_bin_get_by_name (GST_BIN (self->pipeline), WEBRTCSINK_NAME);
+
+    if (!GST_IS_BIN (rtspsrc) || !GST_IS_BIN (webrtcsink))
+    {
+        g_critical ("Couldn't get rtspsrc or webrtcsink elements!");
+        return json_node_init_object (json_node, diagnostics_object);
+    }
+
     gint64 bufferduration, connectionspeed, latency;
     int buffersize;
     g_autofree char *uri;
