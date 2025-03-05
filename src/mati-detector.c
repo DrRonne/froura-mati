@@ -464,6 +464,7 @@ decode_frame_probe_cb (GstPad          *pad,
     self->last_frame_buffer = g_get_monotonic_time ();
     self->framerate = 1 / ((double) (self->last_frame_buffer - previous_frame_buffer) / 1000000);
 
+    if (self->frame_timeout > 0)
     g_source_remove (self->frame_timeout);
     self->frame_timeout = g_timeout_add (DECODE_FRAME_TIMEOUT, decode_frame_timeout, self);
 
