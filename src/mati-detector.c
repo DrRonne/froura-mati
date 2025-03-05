@@ -1,4 +1,5 @@
 #include "mati-detector.h"
+#include <gst/video/video.h>
 
 #define TCP_BIN_SUBNAME "tcpbin_"
 #define TCP_BIN_SUBNAME_LENGTH 7
@@ -13,6 +14,7 @@
 #define PAUSED 3
 #define PLAYING 4
 #define RECORDING_BUFFER ((guint64)10 * 1000000000) // 10 seconds in nanoseconds
+#define THUMBNAIL_REFRESH_INTERVAL ((guint64)10 * 1000000000) // 10 seconds in nanoseconds
 
 GST_DEBUG_CATEGORY_STATIC (mati_detector_debug);
 
@@ -47,6 +49,8 @@ struct _MatiDetector
     char *source_id;
 
     guint motion_stopped_timeout;
+
+    guint thumbnail_timeout;
 };
 
 G_DEFINE_TYPE (MatiDetector, mati_detector, G_TYPE_OBJECT);
@@ -75,6 +79,7 @@ mati_detector_init (MatiDetector *self)
     self->framerate = 0;
     self->last_frame_buffer = 0;
     self->motion_stopped_timeout = 0;
+    self->thumbnail_timeout = 0;
     // self->frame_timeout = g_timeout_add (DECODE_FRAME_TIMEOUT, decode_frame_timeout, self);
 }
 
@@ -640,16 +645,27 @@ build_filesink (MatiDetector *self)
 }
 
 static GstElement*
-build_fakesink (MatiDetector *self)
+build_thumbnailsink (MatiDetector *self)
 {
-    GstElement *bin, *queue_fakesink, *decoder, *videoconvert, *motioncells, *fakesink;
+    GstElement *bin, *queue_fakesink, *decoder, *videoconvert, *motioncells, *videorate, *capsfilter, *jpegenc, *multifilesink;
     GstPad *video_sink_pad;
+    g_autofree char *file_name = NULL;
 
     queue_fakesink = gst_element_factory_make ("queue", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (queue_fakesink), FALSE);
 
-    fakesink = gst_element_factory_make ("fakevideosink", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (fakesink), FALSE);
+    jpegenc = gst_element_factory_make ("jpegenc", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (jpegenc), FALSE);
+
+    multifilesink = gst_element_factory_make ("multifilesink", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (multifilesink), FALSE);
+    file_name = g_strconcat ("/etc/thumbnails/", self->source_id, ".jpg", NULL);
+    g_object_set (G_OBJECT (multifilesink),
+                  "location", file_name,
+                  "post-messages", TRUE,
+                  "next-file", 0, // every buffer is a new image
+                  "sync", FALSE,
+                  NULL);
 
     decoder = gst_element_factory_make ("avdec_h264", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (decoder), FALSE);
@@ -667,10 +683,26 @@ build_fakesink (MatiDetector *self)
     g_object_set (G_OBJECT (motioncells), "display", FALSE, NULL);
     self->motion = motioncells;
 
-    bin = gst_bin_new ("fakesinkbin");
-    gst_bin_add_many (GST_BIN (bin), queue_fakesink, decoder, videoconvert, motioncells, fakesink, NULL);
-    if (!gst_element_link_many (queue_fakesink, decoder, videoconvert, motioncells, fakesink, NULL))
-        g_critical ("Failed to link fakesink elements!");
+    videorate = gst_element_factory_make ("videorate", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (videorate), FALSE);
+    g_object_set (G_OBJECT (videorate),
+                  "max-rate", 1,
+                  "drop-only", TRUE,
+                  "skip-to-first", TRUE,
+                  NULL);
+
+    capsfilter = gst_element_factory_make ("capsfilter", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (capsfilter), FALSE);
+    GstCaps *caps = gst_caps_new_simple ("video/x-raw",
+                                        "framerate", GST_TYPE_FRACTION, 1, 10,
+                                        NULL);
+    g_object_set (G_OBJECT (capsfilter), "caps", caps, NULL);
+    gst_caps_unref (caps);
+
+    bin = gst_bin_new ("thumbnailsinkbin");
+    gst_bin_add_many (GST_BIN (bin), queue_fakesink, decoder, videoconvert, motioncells, videorate, capsfilter, jpegenc, multifilesink, NULL);
+    if (!gst_element_link_many (queue_fakesink, decoder, videoconvert, motioncells, videorate, capsfilter, jpegenc, multifilesink, NULL))
+        g_critical ("Failed to link thumbnailsink elements!");
 
     video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (queue_fakesink, "sink"));
     if (!gst_element_add_pad (bin, video_sink_pad))
@@ -729,7 +761,7 @@ mati_detector_build (MatiDetector *self,
     g_return_val_if_fail (MATI_IS_DETECTOR (self), FALSE);
 
     GstElement *common_pipeline;
-    GstElement *fake_sink_bin, *streamer_bin;
+    GstElement *thumbnail_sink_bin, *streamer_bin;
     GstElement *recording_buffer;
     GstElement *recording_fakesink_queue;
     GstElement *recording_fakesink;
@@ -761,13 +793,13 @@ mati_detector_build (MatiDetector *self,
     g_object_set (G_OBJECT (recording_fakesink),
                   "sync", TRUE,
                   NULL);
-    fake_sink_bin = build_fakesink (self);
+    thumbnail_sink_bin = build_thumbnailsink (self);
 
-    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, fake_sink_bin, streamer_bin, 
+    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, thumbnail_sink_bin, streamer_bin, 
                                recording_buffer, self->recording_tee, recording_fakesink_queue, recording_fakesink,
                                NULL);
 
-    if (!gst_element_link_many (common_pipeline, self->tee, fake_sink_bin, NULL))
+    if (!gst_element_link_many (common_pipeline, self->tee, thumbnail_sink_bin, NULL))
     {
         g_critical ("Couldn't link common pipeline to fakesinkbin!");
         return FALSE;
