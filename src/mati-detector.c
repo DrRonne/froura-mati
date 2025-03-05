@@ -8,9 +8,11 @@
 #define RTSPSRC_NAME "rtspsource"
 #define WEBRTCSINK_NAME "webrtcsink"
 #define FILESINK_NAME "filesink"
+#define RECORDING_BUFFER_NAME "recording-buffer"
 #define DECODE_FRAME_TIMEOUT 10000
 #define PAUSED 3
 #define PLAYING 4
+#define RECORDING_BUFFER ((guint64)10 * 1000000000) // 10 seconds in nanoseconds
 
 GST_DEBUG_CATEGORY_STATIC (mati_detector_debug);
 
@@ -32,6 +34,8 @@ struct _MatiDetector
     GstElement *mux;
     GstElement *motion;
 
+    GstElement *recording_tee;
+
     gint64 last_frame_buffer;
     gdouble framerate;
     guint frame_timeout;
@@ -41,6 +45,8 @@ struct _MatiDetector
     char *peer_id;
 
     char *source_id;
+
+    guint motion_stopped_timeout;
 };
 
 G_DEFINE_TYPE (MatiDetector, mati_detector, G_TYPE_OBJECT);
@@ -68,6 +74,7 @@ mati_detector_init (MatiDetector *self)
     self->file_sink_bin = NULL;
     self->framerate = 0;
     self->last_frame_buffer = 0;
+    self->motion_stopped_timeout = 0;
     // self->frame_timeout = g_timeout_add (DECODE_FRAME_TIMEOUT, decode_frame_timeout, self);
 }
 
@@ -114,7 +121,7 @@ mati_detector_setup_filesink_pipeline (MatiDetector *self)
 
     self->file_sink_bin = build_filesink (self);
     gst_bin_add (GST_BIN (self->pipeline), self->file_sink_bin);
-    if (!gst_element_link (self->tee, self->file_sink_bin))
+    if (!gst_element_link (self->recording_tee, self->file_sink_bin))
         g_critical ("Couldn't link filesink pipeline!");
 
     gst_element_sync_state_with_parent (self->file_sink_bin);
@@ -164,7 +171,7 @@ async_destroy_filesink (gpointer user_data)
 {
     MatiDetector *self = MATI_DETECTOR (user_data);
     sync_state_change (self->file_sink_bin, GST_STATE_NULL, "filesink bin");
-    gst_element_unlink (self->tee, self->file_sink_bin);
+    gst_element_unlink (self->recording_tee, self->file_sink_bin);
     if (!gst_bin_remove (GST_BIN (self->pipeline), self->file_sink_bin))
         g_critical ("Couldn't remove filesink bin from pipeline!");
     self->file_sink_bin = NULL;
@@ -212,13 +219,17 @@ on_mux_queue_blocked (GstPad          *pad,
 }
 
 static gboolean
-mati_detector_destroy_filesink_pipeline (MatiDetector *self)
+mati_detector_destroy_filesink_pipeline (gpointer user_data)
 {
+    MatiDetector *self = MATI_DETECTOR (user_data);
+
     g_autoptr (GstPad) pad = gst_element_get_static_pad (self->mux_queue, "src");
     self->block_pad_id = gst_pad_add_probe (pad,
                                             GST_PAD_PROBE_TYPE_BLOCK_DOWNSTREAM,
                                             on_mux_queue_blocked,
                                             self, NULL);
+    self->motion_stopped_timeout = 0;
+    return G_SOURCE_REMOVE;
 }
 
 static gboolean
@@ -284,9 +295,30 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
                 mati_communicator_emit_motion_event (self->communicator, self->is_in_motion);
 
                 if (self->is_in_motion)
+                {
+                    if (self->motion_stopped_timeout != 0)
+                    {
+                        g_message ("Removing motion stopped timeout");
+                        g_source_remove (self->motion_stopped_timeout);
+                        self->motion_stopped_timeout = 0;
+                    }
+                    else
+                    {
+                        g_message ("setting new filesink");
                     mati_detector_setup_filesink_pipeline (self);
+                    }
+                }
                 else
-                    mati_detector_destroy_filesink_pipeline (self);
+                {
+                    if (self->motion_stopped_timeout != 0)
+                    {
+                        g_message ("Removing previous motion stopped timeout");
+                        g_source_remove (self->motion_stopped_timeout);
+                        self->motion_stopped_timeout = 0;
+                    }
+                    g_message ("setting new motion stopped timeout");
+                    self->motion_stopped_timeout = g_timeout_add_seconds (RECORDING_BUFFER / 1000000000, (GSourceFunc) mati_detector_destroy_filesink_pipeline, self);
+                }
             }
         }
         default:
@@ -532,6 +564,31 @@ build_streamer (MatiDetector *self)
     return bin;
 }
 
+static GstPadProbeReturn
+iframe_probe_cb (GstPad *pad, GstPadProbeInfo *info, gpointer user_data)
+{
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER (info);
+    GstEvent *event = GST_PAD_PROBE_INFO_EVENT (info);
+
+    if (buffer) {
+        if (!(gst_buffer_get_flags (buffer) & GST_BUFFER_FLAG_DELTA_UNIT) && gst_buffer_get_flags (buffer) != 0) {
+            g_message ("I-frame detected, starting recording");
+            return GST_PAD_PROBE_REMOVE;
+        } else {
+            return GST_PAD_PROBE_DROP;
+        }
+    }
+
+    if (event) {
+        if (GST_EVENT_TYPE (event) == GST_EVENT_EOS) {
+            g_message ("EOS event received, stopping probe");
+            return GST_PAD_PROBE_REMOVE;
+        }
+    }
+
+    return GST_PAD_PROBE_OK;
+}
+
 static GstElement*
 build_filesink (MatiDetector *self)
 {
@@ -547,6 +604,7 @@ build_filesink (MatiDetector *self)
     self->mux_queue = queue_detector;
 
     mux_detector = gst_element_factory_make ("matroskamux", NULL);
+    g_object_set (G_OBJECT (mux_detector), "offset-to-zero", TRUE, NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (mux_detector), FALSE);
     self->mux = mux_detector;
 
@@ -555,10 +613,19 @@ build_filesink (MatiDetector *self)
     time_zone = g_time_zone_new_local ();
     date_time = g_date_time_new_now (time_zone);
     date_time_str =  g_date_time_format (date_time, "%H-%M-%S---%d-%m-%Y");
-    file_name = g_strconcat ("/tmp/", date_time_str, "-test.mp4", NULL);
+    file_name = g_strconcat ("/etc/videos/", self->source_id, "/", date_time_str, ".mp4", NULL);
     g_message ("saving to %s", file_name);
-    g_object_set (G_OBJECT (writer_detector), "location", file_name, NULL);
+    g_object_set (G_OBJECT (writer_detector),
+                  "location", file_name,
+                  "sync", TRUE,
+                  NULL);
     gst_element_set_name (writer_detector, FILESINK_NAME);
+
+    /* Add probe that drops frames until a keyframe is received to ensure we
+     * only have a useful, fully readable recording. */
+    GstPad *mux_queue_src_pad = gst_element_get_static_pad (self->mux_queue, "src");
+    gst_pad_add_probe (mux_queue_src_pad, GST_PAD_PROBE_TYPE_BUFFER | GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, iframe_probe_cb, self, NULL);
+    gst_object_unref (mux_queue_src_pad);
 
     bin = gst_bin_new ("filesinkbin");
     gst_bin_add_many (GST_BIN (bin), queue_detector, mux_detector, writer_detector, NULL);
@@ -663,14 +730,42 @@ mati_detector_build (MatiDetector *self,
 
     GstElement *common_pipeline;
     GstElement *fake_sink_bin, *streamer_bin;
+    GstElement *recording_buffer;
+    GstElement *recording_fakesink_queue;
+    GstElement *recording_fakesink;
 
     common_pipeline = build_common_pipeline (self, uri);
     streamer_bin = build_streamer (self);
     self->tee = gst_element_factory_make ("tee", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (self->tee), FALSE);
+    self->recording_tee = gst_element_factory_make ("tee", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (self->recording_tee), FALSE);
+    /* Add a buffer that is at least RECORDING_BUFFER long.
+     * This makes sure that the recording pipeline is running RECORDING_BUFFER
+     * behind so we can "record in the past". */
+    recording_buffer = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (recording_buffer), FALSE);
+    gst_element_set_name (recording_buffer, RECORDING_BUFFER_NAME);
+    g_object_set (recording_buffer,
+                  "max-size-time", RECORDING_BUFFER * 2,
+                  "max-size-bytes", 0,
+                  "max-size-buffers", 0,
+                  NULL);
+    GstPad *recording_buffer_src_pad = gst_element_get_static_pad (recording_buffer, "src");
+    gst_pad_set_offset (recording_buffer_src_pad, RECORDING_BUFFER);
+    gst_object_unref (recording_buffer_src_pad);
+    recording_fakesink_queue = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (recording_fakesink_queue), FALSE);
+    recording_fakesink = gst_element_factory_make ("fakesink", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (recording_fakesink), FALSE);
+    g_object_set (G_OBJECT (recording_fakesink),
+                  "sync", TRUE,
+                  NULL);
     fake_sink_bin = build_fakesink (self);
 
-    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, fake_sink_bin, streamer_bin, NULL);
+    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, fake_sink_bin, streamer_bin, 
+                               recording_buffer, self->recording_tee, recording_fakesink_queue, recording_fakesink,
+                               NULL);
 
     if (!gst_element_link_many (common_pipeline, self->tee, fake_sink_bin, NULL))
     {
@@ -681,6 +776,12 @@ mati_detector_build (MatiDetector *self,
     if (!gst_element_link (self->tee, streamer_bin))
     {
         g_critical ("Couldn't link common pipeline to streamer bin!");
+        return FALSE;
+    }
+
+    if (!gst_element_link_many (self->tee, recording_buffer, self->recording_tee, recording_fakesink_queue, recording_fakesink, NULL))
+    {
+        g_critical ("Couldn't link common pipeline to recording buffer!");
         return FALSE;
     }
 
