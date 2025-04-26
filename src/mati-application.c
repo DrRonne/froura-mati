@@ -44,7 +44,8 @@ mati_application_activate (GApplication *app)
     self->communicator = mati_communicator_new (mati_options_get_id (self->options), self);
 
     self->detector = mati_detector_new (self->communicator,
-                                        mati_options_get_id (self->options));
+                                        mati_options_get_id (self->options),
+                                        mati_options_get_turnserver (self->options));
     if (self->detector == NULL)
         return;
     

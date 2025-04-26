@@ -13,7 +13,8 @@ G_BEGIN_DECLS
 G_DECLARE_FINAL_TYPE (MatiDetector, mati_detector, MATI, DETECTOR, GObject)
 
 MatiDetector* mati_detector_new (MatiCommunicator *communicator,
-                                 char             *source_id);
+                                 char             *source_id,
+                                 char             *turnserver);
 
 void mati_detector_start (MatiDetector *self);
 

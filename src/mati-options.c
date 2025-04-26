@@ -6,6 +6,7 @@ struct _MatiOptions
 
     gchar *id;
     gchar *uri;
+    gchar *turnserver;
 };
 
 G_DEFINE_TYPE (MatiOptions, mati_options, G_TYPE_OBJECT);
@@ -16,6 +17,7 @@ mati_options_init (MatiOptions *self)
 {
     self->id = "";
     self->uri = "";
+    self->turnserver = "";
 }
 
 static void
@@ -45,6 +47,9 @@ mati_options_read (MatiOptions *self, int *argc, char **argv[], GError **err)
         },
         {
             "id", 0, 0, G_OPTION_ARG_STRING, &self->id, "ID of the stream", "camera_livingroom"
+        },
+        {
+            "turnserver", 0, 0, G_OPTION_ARG_STRING, &self->turnserver, "Turnserver to be used by webrtc", "turn://user:password@ipaddress:port"
         },
         { NULL }
     };
@@ -76,6 +81,12 @@ mati_options_get_id (MatiOptions *self)
     return self->id;
 }
 
+gchar *
+mati_options_get_turnserver (MatiOptions *self)
+{
+    return self->turnserver;
+}
+
 MatiOptions *
 mati_options_new ()
 {
@@ -83,6 +94,7 @@ mati_options_new ()
 
     self->id = NULL;
     self->uri = NULL;
+    self->turnserver = NULL;
 
     return self;
 }

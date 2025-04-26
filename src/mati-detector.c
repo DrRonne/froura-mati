@@ -47,6 +47,7 @@ struct _MatiDetector
     char *peer_id;
 
     char *source_id;
+    char *turnserver;
 
     guint motion_stopped_timeout;
 
@@ -334,12 +335,14 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
 
 MatiDetector *
 mati_detector_new (MatiCommunicator *communicator,
-                   char             *source_id)
+                   char             *source_id,
+                   char             *turnserver)
 {
     g_autoptr (MatiDetector) self = g_object_new (MATI_TYPE_DETECTOR, NULL);
     g_autoptr (GstBus) pipeline_bus = NULL;
 
     self->source_id = source_id;
+    self->turnserver = turnserver;
     self->pipeline = gst_pipeline_new ("mati");
     if (self->pipeline == NULL)
         return NULL;
@@ -525,7 +528,7 @@ consumer_added_handler (GstElement *consumer_id, char *webrtcbin, GstElement *ar
     gboolean ret;
     char *ts;
     g_object_get (arg1, "turn-server", &ts, NULL);
-    g_signal_emit_by_name (arg1, "add-turn-server", "turn://test:test123@172.28.167.42:3478", &ret);
+    g_signal_emit_by_name (arg1, "add-turn-server", self->turnserver, &ret);
 }
 
 
@@ -553,7 +556,7 @@ build_streamer (MatiDetector *self)
     g_signal_connect(webrtcsink, "consumer-added", G_CALLBACK (consumer_added_handler), self);
     g_value_init (&turnserver_array, GST_TYPE_ARRAY);
     g_value_init (&deserialized_turnserver, G_TYPE_STRING);
-    gboolean ret = gst_value_deserialize (&deserialized_turnserver, "turn://test:test123@172.28.167.42:3478");
+    gboolean ret = gst_value_deserialize (&deserialized_turnserver, self->turnserver);
     gst_value_array_append_value (&turnserver_array, &deserialized_turnserver);
     g_object_set_property(G_OBJECT(webrtcsink), "turn-servers", &turnserver_array);
     gst_element_set_name (webrtcsink, WEBRTCSINK_NAME);

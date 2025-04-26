@@ -13,5 +13,6 @@ gboolean mati_options_read (MatiOptions *self, int *argc, char **argv[], GError 
 
 gchar *mati_options_get_uri (MatiOptions *self);
 gchar *mati_options_get_id (MatiOptions *self);
+gchar *mati_options_get_turnserver (MatiOptions *self);
 
 G_END_DECLS
