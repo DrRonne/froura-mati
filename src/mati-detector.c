@@ -38,6 +38,8 @@ struct _MatiDetector
 
     GstElement *recording_tee;
 
+    GstElement *decoder_tee;
+
     gint64 last_frame_buffer;
     gdouble framerate;
     guint frame_timeout;
@@ -287,7 +289,7 @@ on_pipeline_message (GstBus *bus, GstMessage *message, gpointer user_data)
                         break;
                     }
                 }
-                GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/pipeline");
+                GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
             }
             break;
         }
@@ -444,7 +446,7 @@ static gboolean
 dump_dot (MatiDetector *self)
 {
     g_message ("dumping dot");
-    GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "/tmp/pipeline");
+    GST_DEBUG_BIN_TO_DOT_FILE (GST_BIN (self->pipeline), GST_DEBUG_GRAPH_SHOW_ALL, "pipeline");
     return TRUE;
 }
 
@@ -531,12 +533,32 @@ consumer_added_handler (GstElement *consumer_id, char *webrtcbin, GstElement *ar
     g_signal_emit_by_name (arg1, "add-turn-server", self->turnserver, &ret);
 }
 
+static gboolean
+encoder_setup (GstElement * consumer_id,
+               char *pad_name,
+               char *encoder_name,
+               GstElement *encoder,
+               gpointer udata)
+{
+    if (g_str_has_prefix (GST_OBJECT_NAME (encoder), "x264enc")) {
+        g_object_set(encoder,
+            "tune", 4, // zero-latency
+            "speed-preset", 1, // ultrafast
+            "bitrate", 512,
+            "key-int-max", 30,
+            "cabac", FALSE,
+            NULL);
+    }
+
+    return TRUE;
+}
 
 static GstElement*
 build_streamer (MatiDetector *self)
 {
-    GstElement *bin, *streamer_queue, *webrtcsink;
+    GstElement *bin, *streamer_queue, *webrtcsink, *videoscale, *capsfilter;
     GstPad *video_sink_pad;
+    GstCaps *scale_caps;
 
     streamer_queue = gst_element_factory_make ("queue", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (streamer_queue), FALSE);
@@ -554,16 +576,18 @@ build_streamer (MatiDetector *self)
     g_object_get (signaller, "uri", &uri, NULL);
     g_signal_connect (signaller, "peer-id-ready", G_CALLBACK (peer_id_handler), self);
     g_signal_connect(webrtcsink, "consumer-added", G_CALLBACK (consumer_added_handler), self);
+    g_signal_connect(webrtcsink, "encoder-setup", G_CALLBACK(encoder_setup), NULL);
     g_value_init (&turnserver_array, GST_TYPE_ARRAY);
     g_value_init (&deserialized_turnserver, G_TYPE_STRING);
     gboolean ret = gst_value_deserialize (&deserialized_turnserver, self->turnserver);
     gst_value_array_append_value (&turnserver_array, &deserialized_turnserver);
     g_object_set_property(G_OBJECT(webrtcsink), "turn-servers", &turnserver_array);
     gst_element_set_name (webrtcsink, WEBRTCSINK_NAME);
+    g_object_set(webrtcsink, "audio-caps", NULL, NULL);
 
     bin = gst_bin_new ("streamerbin");
     gst_bin_add_many (GST_BIN (bin), streamer_queue, webrtcsink, NULL);
-    if (!gst_element_link (streamer_queue, webrtcsink))
+    if (!gst_element_link_many (streamer_queue, webrtcsink, NULL))
         g_critical ("Failed to link streamer elements!");
 
     video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (streamer_queue, "sink"));
@@ -649,9 +673,23 @@ build_filesink (MatiDetector *self)
 }
 
 static GstElement*
+build_decoder (MatiDetector *self)
+{
+    GstElement *decoder;
+    decoder = gst_element_factory_make ("avdec_h264", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (decoder), FALSE);
+    gst_pad_add_probe(gst_element_get_static_pad (decoder, "src"),
+                      GST_PAD_PROBE_TYPE_BUFFER,
+                      decode_frame_probe_cb,
+                      self,
+                      NULL);
+    return decoder;
+}
+
+static GstElement*
 build_thumbnailsink (MatiDetector *self)
 {
-    GstElement *bin, *queue_fakesink, *decoder, *videoconvert, *motioncells, *videorate, *capsfilter, *jpegenc, *multifilesink;
+    GstElement *bin, *queue_fakesink, *videoconvert, *motioncells, *videorate, *capsfilter, *jpegenc, *multifilesink;
     GstPad *video_sink_pad;
     g_autofree char *file_name = NULL;
 
@@ -670,14 +708,6 @@ build_thumbnailsink (MatiDetector *self)
                   "next-file", 0, // every buffer is a new image
                   "sync", FALSE,
                   NULL);
-
-    decoder = gst_element_factory_make ("avdec_h264", NULL);
-    g_return_val_if_fail (GST_IS_ELEMENT (decoder), FALSE);
-    gst_pad_add_probe(gst_element_get_static_pad (decoder, "src"),
-                      GST_PAD_PROBE_TYPE_BUFFER,
-                      decode_frame_probe_cb,
-                      self,
-                      NULL);
 
     videoconvert = gst_element_factory_make ("videoconvert", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videoconvert), FALSE);
@@ -704,8 +734,8 @@ build_thumbnailsink (MatiDetector *self)
     gst_caps_unref (caps);
 
     bin = gst_bin_new ("thumbnailsinkbin");
-    gst_bin_add_many (GST_BIN (bin), queue_fakesink, decoder, videoconvert, motioncells, videorate, capsfilter, jpegenc, multifilesink, NULL);
-    if (!gst_element_link_many (queue_fakesink, decoder, videoconvert, motioncells, videorate, capsfilter, jpegenc, multifilesink, NULL))
+    gst_bin_add_many (GST_BIN (bin), queue_fakesink, videoconvert, motioncells, videorate, capsfilter, jpegenc, multifilesink, NULL);
+    if (!gst_element_link_many (queue_fakesink, videoconvert, motioncells, videorate, capsfilter, jpegenc, multifilesink, NULL))
         g_critical ("Failed to link thumbnailsink elements!");
 
     video_sink_pad = gst_ghost_pad_new ("videosink", gst_element_get_static_pad (queue_fakesink, "sink"));
@@ -729,7 +759,10 @@ build_common_pipeline (MatiDetector *self,
 
     videosource = gst_element_factory_make ("rtspsrc", NULL);
     g_return_val_if_fail (GST_IS_ELEMENT (videosource), FALSE);
-    g_object_set (G_OBJECT (videosource), "location", uri, NULL);
+    g_object_set (G_OBJECT (videosource), 
+                  "location", uri,
+                  "media", "video",
+                  NULL);
     gst_element_set_name (videosource, RTSPSRC_NAME);
     g_signal_connect (videosource, "pad-added", G_CALLBACK (pad_added_handler), self);
 
@@ -769,6 +802,8 @@ mati_detector_build (MatiDetector *self,
     GstElement *recording_buffer;
     GstElement *recording_fakesink_queue;
     GstElement *recording_fakesink;
+    GstElement *decoder;
+    GstElement *decoder_queue;
 
     common_pipeline = build_common_pipeline (self, uri);
     streamer_bin = build_streamer (self);
@@ -798,20 +833,32 @@ mati_detector_build (MatiDetector *self,
                   "sync", TRUE,
                   NULL);
     thumbnail_sink_bin = build_thumbnailsink (self);
+    
+    self->decoder_tee = gst_element_factory_make ("tee", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (self->decoder_tee), FALSE);
+    decoder = build_decoder (self);
+    decoder_queue = gst_element_factory_make ("queue", NULL);
+    g_return_val_if_fail (GST_IS_ELEMENT (decoder_queue), FALSE);
 
-    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, thumbnail_sink_bin, streamer_bin, 
-                               recording_buffer, self->recording_tee, recording_fakesink_queue, recording_fakesink,
-                               NULL);
+    gst_bin_add_many (GST_BIN (self->pipeline), common_pipeline, self->tee, decoder_queue, decoder, self->decoder_tee,
+                      streamer_bin, thumbnail_sink_bin, recording_buffer, self->recording_tee,
+                      recording_fakesink_queue, recording_fakesink, NULL);
 
-    if (!gst_element_link_many (common_pipeline, self->tee, thumbnail_sink_bin, NULL))
+    if (!gst_element_link_many (common_pipeline, self->tee, decoder_queue, decoder, NULL))
+    {
+        g_critical ("Couldn't link common pipeline to decoder!");
+        return FALSE;
+    }
+
+    if (!gst_element_link_many (decoder, self->decoder_tee, thumbnail_sink_bin, NULL))
     {
         g_critical ("Couldn't link common pipeline to fakesinkbin!");
         return FALSE;
     }
 
-    if (!gst_element_link (self->tee, streamer_bin))
+    if (!gst_element_link (self->decoder_tee, streamer_bin))
     {
-        g_critical ("Couldn't link common pipeline to streamer bin!");
+        g_critical ("Couldn't link decoder pipeline to streamer bin!");
         return FALSE;
     }
 
